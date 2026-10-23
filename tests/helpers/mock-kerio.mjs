@@ -10,9 +10,7 @@ import crypto from 'node:crypto';
 const fixture = (name) => readFileSync(new URL(`../fixtures/${name}`, import.meta.url), 'utf8');
 
 export const TEST_CA = fixture('ca.pem');
-export const READ_METHODS = ['Session.login', 'Folders.get', 'Mails.get', 'Mails.getById', 'Mails.getPageWithId', 'GET attachment'];
-/** Like the real server, Mails.getById only returns the start of the text. */
-export const PREVIEW_CHARS = 90;
+export const READ_METHODS = ['Session.login', 'Folders.get', 'Mails.get', 'Mails.getById', 'GET attachment'];
 
 export const INBOX = 'keriostorage://folder/example.com/jan/inbox';
 export const SENT = 'keriostorage://folder/example.com/jan/sent';
@@ -123,23 +121,10 @@ export async function startMockKerio({ mails = makeMails(10), files = {}, userna
         const errors = [];
         params.ids.forEach((mailId, inputIndex) => {
           const mail = state.mails.find((item) => item.id === mailId);
-          if (!mail) return errors.push({ inputIndex, code: -32602, message: 'Item not found' });
-          const preview = structuredClone(mail);
-          preview.displayableParts = preview.displayableParts.map((part) => ({ ...part, content: part.content.slice(0, PREVIEW_CHARS) }));
-          result.push(preview);
+          if (mail) result.push(structuredClone(mail));
+          else errors.push({ inputIndex, code: -32602, message: 'Item not found' });
         });
         return ok({ result, errors });
-      }
-
-      case 'Mails.getPageWithId': {
-        const inScope = state.mails.filter((mail) => params.folderIds.includes(mail.folderId));
-        const index = inScope.findIndex((mail) => mail.id === params.id);
-        if (index < 0) return ok({ list: [], start: 0, totalItems: inScope.length });
-        const start = Math.floor(index / params.query.limit) * params.query.limit;
-        const list = inScope.slice(start, start + params.query.limit).map((mail) =>
-          Object.fromEntries(params.query.fields.filter((field) => field in mail).map((field) => [field, mail[field]]))
-        );
-        return ok({ list, start, totalItems: inScope.length });
       }
 
       case 'Mails.create': {

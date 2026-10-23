@@ -11,7 +11,6 @@ import type { NetworkConfig } from './config.js';
 import { assertServerAllowed } from './network.js';
 import { PACKAGE_VERSION } from './version.js';
 import type {
-  DisplayablePart,
   JsonRpcResponse,
   KerioCredentials,
   KerioError,
@@ -24,7 +23,7 @@ import type {
 } from './types.js';
 
 /** API methods the connector may call in read-only mode (besides Session.login). */
-const READ_METHODS = new Set(['Folders.get', 'Mails.get', 'Mails.getById', 'Mails.getPageWithId']);
+const READ_METHODS = new Set(['Folders.get', 'Mails.get', 'Mails.getById']);
 /** Attachments may only be downloaded from this path of the connected Kerio server. */
 const ATTACHMENT_PATH_PREFIX = '/webmail/api/download/attachment/';
 const SEND_METHOD = 'Mails.create';
@@ -186,24 +185,10 @@ export class KerioClient {
     return { list: result.list ?? [], totalItems: result.totalItems ?? 0 };
   }
 
-  /** Fetches mails directly by ID (works for any age of message). Their text is only a short preview. */
+  /** Fetches mails directly by ID (works for any age of message), including text parts and attachments. */
   public async getMailsById(ids: string[]): Promise<MailsGetByIdResult> {
     const result = await this.read<MailsGetByIdResult>('Mails.getById', { ids });
     return { result: result.result ?? [], errors: result.errors ?? [] };
-  }
-
-  /** The complete displayable text of one mail, or null if Kerio does not return the mail. */
-  public async getMailBody(mailId: string, folderId: string): Promise<DisplayablePart[] | null> {
-    const result = await this.read<{ list?: KerioMail[] }>('Mails.getPageWithId', {
-      folderIds: [folderId],
-      query: {
-        fields: ['id', 'displayableParts'],
-        limit: 1,
-        orderBy: [{ columnName: 'receiveDate', direction: 'Desc', caseSensitive: true }],
-      },
-      id: mailId,
-    });
-    return result.list?.find((mail) => mail.id === mailId)?.displayableParts ?? null;
   }
 
   /**

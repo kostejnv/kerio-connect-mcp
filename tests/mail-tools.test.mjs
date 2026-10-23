@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 
 import { connectMcp, makeClient, textOf } from './helpers/clients.mjs';
-import { INBOX, PREVIEW_CHARS, SENT, kerioDate, makeMails, startMockKerio } from './helpers/mock-kerio.mjs';
+import { INBOX, SENT, kerioDate, makeMails, startMockKerio } from './helpers/mock-kerio.mjs';
 
 const PROJECTS = 'keriostorage://folder/example.com/jan/projects';
 const nextOffsetOf = (text) => Number(text.match(/nextOffset: (\d+)/)?.[1] ?? NaN);
@@ -12,6 +12,11 @@ describe('mail tools', () => {
   let mock;
   let mcp;
   const longBody = 'Lorem ipsum dolor sit amet. '.repeat(3000); // 84,000 characters
+  // As seen on Kerio Connect 10: the full text in an HTML part plus a short plain-text preview of it.
+  const htmlWithPlainPreview = [
+    { contentType: 'ctTextHtml', content: '<p>Dobrý den,</p><p>V&nbsp;příloze posílám protokol z&nbsp;hygieny.</p><p>Z výsledků vyplývá, že je vše v pořádku.</p><p>S pozdravem<br>Martina</p>' },
+    { contentType: 'ctTextPlain', content: 'Dobrý den,  V příloze posílám protokol z hygieny.  Z' },
+  ];
 
   before(async () => {
     mock = await startMockKerio({
@@ -20,6 +25,7 @@ describe('mail tools', () => {
         ...(index === 6900 ? { from: { name: 'Ancient Customer', address: 'ancient@client.cz' }, subject: 'Contract 2007' } : {}),
         ...(index === 3 ? { isSeen: false, displayableParts: [{ contentType: 'ctTextPlain', content: longBody }] } : {}),
         ...(index === 4 ? { displayableParts: [{ contentType: 'ctTextHtml', content: '<p>Hello&nbsp;<b>world</b></p><script>x()</script>' }] } : {}),
+        ...(index === 5 ? { displayableParts: htmlWithPlainPreview } : {}),
         ...(index % 100 === 0 ? { folderId: PROJECTS } : {}),
       })),
     });
@@ -163,12 +169,10 @@ describe('mail tools', () => {
     assert.match(text, /Showing results 1-5 of 7000/);
   });
 
-  test('returns the complete body although Mails.getById only gives a preview', async () => {
-    const text = await call('mail_get', { id: mock.state.mails[3].id, maxChars: 100000 });
-    assert.ok(longBody.length > PREVIEW_CHARS);
-    assert.match(text, /Body: 83999 characters\. COMPLETE\./);
-    assert.doesNotMatch(text, /WARNING/);
-    assert.equal(mock.callsOf('Mails.getPageWithId').length, 1);
+  test('uses the full HTML text and drops the short plain-text preview Kerio adds', async () => {
+    const text = await call('mail_get', { id: mock.state.mails[5].id });
+    assert.match(text, /Z výsledků vyplývá, že je vše v pořádku\.\n+S pozdravem\nMartina/);
+    assert.equal(text.match(/Dobrý den,/g).length, 1, 'preview must not be repeated');
   });
 
   test('marks read tools as read-only', async () => {

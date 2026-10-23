@@ -236,17 +236,23 @@ function mailFlags(mail: KerioMail): string[] {
   return flags;
 }
 
-/** All displayable parts in order, HTML converted to text; identical alternatives are kept once. */
+/**
+ * All displayable parts in order, HTML converted to text. Kerio often adds a short plain-text
+ * preview next to the full HTML part; a part whose text is already contained in another is skipped.
+ */
 function mailBodyText(parts: DisplayablePart[]): string {
-  const texts: string[] = [];
-  for (const part of parts) {
-    const text = part.contentType === 'ctTextHtml' ? htmlToText(part.content) : part.content.trim();
-    const normalized = text.replace(/\s+/g, ' ').trim();
-    if (normalized && !texts.some((existing) => existing.replace(/\s+/g, ' ').trim() === normalized)) {
-      texts.push(text);
-    }
-  }
-  return texts.join('\n\n').replace(/<<<(BEGIN|END) UNTRUSTED EMAIL CONTENT>>>/g, '[removed marker]');
+  const normalize = (text: string) => text.replace(/\s+/g, '').toLowerCase();
+  const texts = parts
+    .map((part) => (part.contentType === 'ctTextHtml' ? htmlToText(part.content) : part.content.trim()))
+    .filter((text) => normalize(text) !== '');
+  const kept = texts.filter((text, index) =>
+    !texts.some((other, otherIndex) => {
+      if (otherIndex === index || !normalize(other).includes(normalize(text))) return false;
+      // Of two parts with the same text keep the first.
+      return normalize(other).length > normalize(text).length || otherIndex < index;
+    })
+  );
+  return kept.join('\n\n').replace(/<<<(BEGIN|END) UNTRUSTED EMAIL CONTENT>>>/g, '[removed marker]');
 }
 
 function untrusted(text: string): string {
@@ -610,9 +616,7 @@ export async function mailGet(client: KerioClient, args: unknown): Promise<ToolR
   if ('error' in found) return found.error;
   const { mail } = found;
 
-  // Mails.getById only returns a preview of the text; the complete parts come from Mails.getPageWithId.
-  const fullParts = mail.folderId ? await client.getMailBody(mail.id, mail.folderId) : null;
-  const body = mailBodyText(fullParts ?? mail.displayableParts ?? []);
+  const body = mailBodyText(mail.displayableParts ?? []);
   const { status, slice } = textPart(body, params.offset, params.maxChars, 'Body', 'mail_get');
   const mailbox = await loadMailbox(client);
   const flags = mailFlags(mail);
@@ -633,7 +637,7 @@ export async function mailGet(client: KerioClient, args: unknown): Promise<ToolR
     attachments.length > 0
       ? `Attachments (read with mail_get_attachment and the number):\n${attachments.map((a, i) => describeAttachment(a, i + 1)).join('\n')}`
       : null,
-    fullParts ? status : `${status} WARNING: Kerio returned only a preview of the text; the full body was not available.`,
+    status,
   ].filter(Boolean);
 
   return { text: `${lines.join('\n')}\n\n${untrusted(slice)}` };
