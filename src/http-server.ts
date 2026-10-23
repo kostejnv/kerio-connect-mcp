@@ -16,7 +16,7 @@ import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middlew
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { KerioClient, KerioLoginError, KerioTransportError } from './client.js';
 import type { HttpConfig } from './config.js';
-import { sendErrorPage, sendLoginPage } from './login-page.js';
+import { sendErrorPage, sendLoginPage, type LocalizedText } from './login-page.js';
 import { createMcpServer } from './mcp-server.js';
 import { normalizeServerUrl, ServerNotAllowedError } from './network.js';
 import { StatelessOAuthProvider, type Grant } from './oauth-provider.js';
@@ -62,11 +62,20 @@ class KerioClientPool {
   }
 }
 
-function loginErrorMessage(error: unknown): string {
-  if (error instanceof ServerNotAllowedError) return error.message;
-  if (error instanceof KerioLoginError) return 'Přihlášení ke Keriu se nezdařilo. Zkontrolujte uživatelské jméno a heslo.';
-  if (error instanceof KerioTransportError) return `Kerio server není dostupný: ${error.message}`;
-  return 'Přihlášení se nezdařilo kvůli neočekávané chybě.';
+function loginErrorMessage(error: unknown): LocalizedText {
+  if (error instanceof ServerNotAllowedError) {
+    return { en: error.message, cs: `Tento Kerio server nelze použít (${error.message}).` };
+  }
+  if (error instanceof KerioLoginError) {
+    return {
+      en: 'Kerio sign-in failed. Check your username and password.',
+      cs: 'Přihlášení ke Keriu se nezdařilo. Zkontrolujte uživatelské jméno a heslo.',
+    };
+  }
+  if (error instanceof KerioTransportError) {
+    return { en: `Kerio server is not reachable: ${error.message}`, cs: `Kerio server není dostupný: ${error.message}` };
+  }
+  return { en: 'Sign-in failed because of an unexpected error.', cs: 'Přihlášení se nezdařilo kvůli neočekávané chybě.' };
 }
 
 export function createHttpApp(config: HttpConfig, dispatcher: Dispatcher) {
@@ -108,7 +117,10 @@ export function createHttpApp(config: HttpConfig, dispatcher: Dispatcher) {
       const body = req.body as Record<string, string | undefined>;
       const pending = provider.openAuthRequest(body.request ?? '');
       if (!pending) {
-        sendErrorPage(res, 400, 'Přihlašovací požadavek vypršel nebo je neplatný. Začněte připojení znovu ve své aplikaci.');
+        sendErrorPage(res, 400, {
+          en: 'This sign-in request has expired or is invalid. Start connecting again from your app.',
+          cs: 'Přihlašovací požadavek vypršel nebo je neplatný. Začněte připojení znovu ve své aplikaci.',
+        });
         return;
       }
 

@@ -123,7 +123,8 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
     const { login } = await signIn(app, mock, { password: 'wrong' });
     assert.equal(login.status, 400);
     const page = await login.text();
-    assert.match(page, /Přihlášení ke Keriu se nezdařilo/);
+    assert.match(page, /Kerio sign-in failed/);
+    assert.match(page, /Přihlášení ke Keriu se nezdařilo/, 'Czech variant is available through the language switch');
     assert.doesNotMatch(page, /wrong/);
   });
 
