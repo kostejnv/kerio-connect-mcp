@@ -12,13 +12,13 @@ import { startMockKerio } from './helpers/mock-kerio.mjs';
 
 const REDIRECT_URI = 'https://claude.ai/api/mcp/auth_callback';
 
-async function startApp({ allowSend = false, network: networkOverrides = {} } = {}) {
+async function startApp({ allowSend = false, network: networkOverrides = {}, tokenKey = crypto.randomBytes(32) } = {}) {
   const server = http.createServer();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://localhost:${server.address().port}`;
   const network = testNetwork(networkOverrides);
   const app = createHttpApp(
-    { transport: 'http', network, publicUrl: new URL(baseUrl), port: 0, tokenKey: crypto.randomBytes(32), allowSend },
+    { transport: 'http', network, publicUrl: new URL(baseUrl), port: 0, tokenKey, allowSend },
     createKerioDispatcher(network)
   );
   server.on('request', app);
@@ -226,5 +226,25 @@ describe('sending enabled on the server', () => {
     assert.match(textOf(result), /^SENT\./);
     assert.equal(mock.callsOf('Mails.create').length, 1);
     await sendClient.close();
+  });
+
+  test('turning the master switch off also withdraws sending from existing connections', async () => {
+    const tokenKey = crypto.randomBytes(32);
+    const sendApp = await startApp({ allowSend: true, tokenKey });
+    const { tokens } = await signIn(sendApp, mock, { allowSend: true });
+    await sendApp.close();
+
+    const restartedWithoutSend = await startApp({ allowSend: false, tokenKey });
+    try {
+      const client = await mcpClient(restartedWithoutSend, tokens.access_token);
+      assert.ok(!(await client.listTools()).tools.some((tool) => tool.name === 'mail_send'));
+      const creates = mock.callsOf('Mails.create').length;
+      const result = await client.callTool({ name: 'mail_send', arguments: { to: ['a@example.org'], subject: 's', body: 'b' } });
+      assert.equal(result.isError, true);
+      assert.equal(mock.callsOf('Mails.create').length, creates);
+      await client.close();
+    } finally {
+      await restartedWithoutSend.close();
+    }
   });
 });

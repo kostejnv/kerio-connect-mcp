@@ -81,8 +81,14 @@ function loginErrorMessage(error: unknown): LocalizedText {
 export function createHttpApp(config: HttpConfig, dispatcher: Dispatcher) {
   const mcpUrl = new URL('/mcp', config.publicUrl);
   const sealer = new TokenSealer(config.tokenKey);
+  // The master switch applies to every request, so turning it off also covers connections granted sending earlier.
   const newClient = (grant: Grant) =>
-    new KerioClient({ credentials: grant.credentials, network: config.network, dispatcher, sendEnabled: grant.sendEnabled });
+    new KerioClient({
+      credentials: grant.credentials,
+      network: config.network,
+      dispatcher,
+      sendEnabled: config.allowSend && grant.sendEnabled,
+    });
   const pool = new KerioClientPool(newClient);
 
   const provider = new StatelessOAuthProvider(sealer, (res, pending, authRequest) =>
