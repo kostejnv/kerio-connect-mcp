@@ -33,3 +33,7 @@ yarn-error.log*
 coverage/
 .nyc_output/
 CLAUDE.md
+
+# Trusted Kerio certificates are installation-specific
+certs/*
+!certs/.gitkeep

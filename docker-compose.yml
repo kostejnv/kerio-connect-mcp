@@ -7,6 +7,9 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    # Company CA / self-signed Kerio certificates referenced by KERIO_CA_FILE (e.g. /app/certs/kerio.pem).
+    volumes:
+      - ./certs:/app/certs:ro
     cap_drop:
       - ALL
     security_opt:

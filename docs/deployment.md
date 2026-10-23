@@ -64,10 +64,31 @@ Then connect a client (see [README](../README.md#connecting-a-client)).
 | `MCP_TOKEN_KEY` | — | 32 random bytes, base64 |
 | `KERIO_ALLOW_SEND` | `false` | `true` offers sending as a per-connection opt-in on the sign-in page |
 | `KERIO_ALLOWED_SERVERS` | empty | Comma-separated Kerio host names users may connect to; empty = any public host |
-| `KERIO_CA_FILE` | — | Path (inside the container) to a PEM company CA; mount it as a read-only volume |
+| `KERIO_CA_FILE` | — | Path inside the container to a PEM company CA or self-signed Kerio certificate, e.g. `/app/certs/kerio.pem` (see below) |
 | `KERIO_REQUEST_TIMEOUT_MS` | `30000` | Timeout for requests to Kerio |
 
 Changes to `.env` take effect after `docker compose up -d`.
+
+### Kerio servers with a company or self-signed certificate
+
+Kerio Connect often uses its own self-signed certificate. Certificate verification stays on; instead, trust that specific
+certificate (or the company CA that issued it). The `certs/` directory is mounted read-only at `/app/certs` and its
+contents are not committed.
+
+```bash
+cd /root/kerio-mcp
+# fetch the certificate the server presents
+echo | openssl s_client -connect mail.example.com:443 -servername mail.example.com 2>/dev/null \
+  | openssl x509 -outform PEM > certs/mail.example.com.pem
+# compare this fingerprint with the one your IT department (or the browser) shows
+openssl x509 -in certs/mail.example.com.pem -noout -fingerprint -sha256
+echo 'KERIO_CA_FILE=/app/certs/mail.example.com.pem' >> .env
+docker compose up -d
+```
+
+Fetching the certificate over the network trusts whatever is presented at that moment, so confirm the fingerprint through
+an independent channel. Several certificates can be concatenated into one PEM file. When the Kerio certificate is
+renewed, repeat the steps.
 
 ## Operations
 
