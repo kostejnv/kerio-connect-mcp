@@ -16,6 +16,10 @@ Against the **simulated Kerio API** (`npm test`), built from the official
 
 On the **deployed server**: valid HTTPS, OAuth metadata, dynamic client registration and the sign-in page.
 
+Against **Kerio Connect 10.0.8 patch 2** (`mail.sapmimon.cz`, without signing in): TLS with the server's self-signed
+certificate trusted through `KERIO_CA_FILE` (and rejected without it), and a JSON-RPC request without a session answers
+`{"code": -32001, "message": "Session expired."}`, the code the client treats as an expired session (assumption 5).
+
 ## Not yet verified against a real Kerio server
 
 These behaviours are not specified in Kerio's documentation and are assumptions:
@@ -26,7 +30,7 @@ These behaviours are not specified in Kerio's documentation and are assumptions:
 | 2 | `receiveDate` looks like `20240115T093000+0100` (or ISO 8601) | date filters, date display | Date filters match nothing |
 | 3 | `Mails.get` over several folders sorts by `receiveDate` descending and returns `totalItems` | search order, totals, early stop with `dateFrom` | Wrong order or totals (the early stop switches itself off if results are not newest first) |
 | 4 | `QUICKSEARCH` with `Like` performs the full-text search | `query` | `query` finds nothing or errors |
-| 5 | An expired session is reported with codes -32001 to -32003 or HTTP 401 | session renewal | Errors after idle time instead of a silent re-login |
+| 5 | An expired session is reported with codes -32001 to -32003 or HTTP 401 (confirmed for a missing session: -32001) | session renewal | Errors after idle time instead of a silent re-login |
 | 6 | Partial success of `Mails.create` mentions "partial" in the error code or message | `SENT WITH WARNINGS` | Reported as `NOT SENT` although it was sent |
 | 7 | Kerio accepts `from` = the username when it is an e-mail address, and fills in the sender otherwise | `mail_send` | Sending fails or uses an unexpected sender |
 
