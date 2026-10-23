@@ -3,6 +3,40 @@
 All notable changes to this project are documented in this file. The project
 follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-10-23
+
+Fork focused on reliable mail reading. Breaking: all non-mail and mail-changing
+tools were removed and the tools were renamed.
+
+### Added
+
+- Remote MCP endpoint (Streamable HTTP) with a stateless OAuth 2.1 server:
+  users sign in with their own Kerio server, login and password; credentials
+  live only inside encrypted tokens (AES-256-GCM), nothing is stored on the
+  server. Access tokens last 1 hour, refresh tokens 90 days.
+- `mail_search`: all folders or one folder, server-side full-text query,
+  sender/recipient/subject/date/unread filters with complete scanning,
+  exact totals and `nextOffset` pagination.
+- `mail_get`: direct `Mails.getById` lookup (any message age) and the full
+  body in parts with explicit COMPLETE/PARTIAL status.
+- Optional `mail_send` (plain text, To/Cc/Bcc) with clear SENT / SENT WITH
+  WARNINGS / NOT SENT / RESULT UNKNOWN outcomes and no automatic retry.
+- API method allowlist in the client; session renewal with one retry for reads.
+- Outbound policy: https only, optional host allowlist, private networks blocked.
+- Dockerfile and docker-compose for deployment behind a reverse proxy.
+- Tests against an HTTPS mock of the Kerio API; optional read-only integration test.
+
+### Changed
+
+- TLS certificates are always verified; `KERIO_CA_FILE` adds a company CA.
+- Sending requires an explicit `true` (stdio: `KERIO_ENABLE_SEND`; http:
+  `KERIO_ALLOW_SEND` plus a per-connection opt-in). Invalid values stop startup.
+
+### Removed
+
+- Notes, tasks, contacts, calendar, folder creation, drafts, move, flag,
+  mark-read and delete tools.
+
 ## [0.2.1] - 2026-09-02
 
 ### Added

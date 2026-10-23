@@ -1,1443 +1,367 @@
 /**
- * Kerio Connect API Client
- * Handles authentication, session management, and API calls
+ * Kerio Connect client JSON-RPC API (/webmail/api/jsonrpc), limited to mail reading and,
+ * when explicitly enabled, sending.
+ *
+ * Every request goes through an allowlist of API methods. Read requests may be repeated once
+ * after a session renewal or a network error; sending is never repeated automatically.
  */
 
-import { request } from 'undici';
+import { request, type Dispatcher } from 'undici';
+import type { NetworkConfig } from './config.js';
+import { assertServerAllowed } from './network.js';
 import { PACKAGE_VERSION } from './version.js';
 import type {
-  JsonRpcRequest,
   JsonRpcResponse,
-  SessionLoginParams,
-  SessionLoginResult,
+  KerioCredentials,
+  KerioError,
   KerioFolder,
-  KerioNote,
-  KerioTask,
   KerioMail,
-  KerioContact,
-  KerioOccurrence,
-  EmailAddress,
-  MailDisplayablePart,
-  PhoneNumber,
-  ContactEmailAddress,
-  PostalAddress,
-  ContactUrl,
-  EventAttendee,
-  EventReminder,
-  FoldersGetResult,
-  NotesGetResult,
-  TasksGetResult,
+  MailsCreateResult,
+  MailsGetByIdResult,
   MailsGetResult,
-  ContactsGetResult,
-  OccurrencesGetResult,
-  QueryCondition,
-  Query,
-  KerioConfig,
-  FolderInfo,
-  SearchResult,
+  SearchCondition,
 } from './types.js';
 
-interface SharedMailbox {
-  mailboxId?: string;
-  isLoaded?: boolean;
-  folders?: KerioFolder[];
+/** API methods the connector may call in read-only mode (besides Session.login). */
+const READ_METHODS = new Set(['Folders.get', 'Mails.get', 'Mails.getById']);
+const SEND_METHOD = 'Mails.create';
+const OUTGOING_MAIL_FIELDS = new Set(['send', 'from', 'to', 'cc', 'bcc', 'subject', 'displayableParts']);
+
+// Kerio reports an expired or invalid session with these JSON-RPC codes; HTTP 401 is treated the same way.
+const SESSION_ERROR_CODES = new Set([-32001, -32002, -32003]);
+
+const MAIL_LIST_FIELDS = [
+  'id', 'folderId', 'from', 'to', 'cc', 'subject', 'receiveDate', 'sendDate',
+  'isSeen', 'isFlagged', 'isAnswered', 'isDraft', 'hasAttachment', 'size',
+];
+
+/** The Kerio server answered with an error. */
+export class KerioApiError extends Error {
+  constructor(message: string, public readonly code?: number) {
+    super(message);
+    this.name = 'KerioApiError';
+  }
 }
 
-interface SharedMailboxResult {
-  mailboxes?: SharedMailbox[];
-  list?: SharedMailbox[];
+export class KerioSessionError extends KerioApiError {
+  constructor(message: string, code?: number) {
+    super(message, code);
+    this.name = 'KerioSessionError';
+  }
+}
+
+export class KerioLoginError extends KerioApiError {
+  constructor(message: string, code?: number) {
+    super(message, code);
+    this.name = 'KerioLoginError';
+  }
+}
+
+/** The request was refused locally by the connector's policy; nothing was sent to Kerio. */
+export class KerioPolicyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'KerioPolicyError';
+  }
+}
+
+/** No usable answer from the server (connection, TLS, timeout, malformed response). */
+export class KerioTransportError extends Error {
+  constructor(message: string, public readonly mayHaveReachedServer: boolean) {
+    super(message);
+    this.name = 'KerioTransportError';
+  }
+}
+
+// Errors raised before the request body could have been delivered.
+const CONNECT_PHASE_ERROR_CODES = new Set([
+  'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT', 'EKERIO_BLOCKED_ADDRESS',
+  'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'ERR_TLS_CERT_ALTNAME_INVALID',
+]);
+
+function toTransportError(error: unknown): KerioTransportError {
+  const cause = error as { code?: string; cause?: { code?: string }; message?: string };
+  const code = cause?.code ?? cause?.cause?.code ?? '';
+  const message = cause?.message ?? String(error);
+  return new KerioTransportError(
+    `Connection to Kerio failed: ${message}${code ? ` (${code})` : ''}`,
+    !CONNECT_PHASE_ERROR_CODES.has(code)
+  );
+}
+
+export type SendOutcome =
+  | { status: 'sent' }
+  | { status: 'sent_with_warnings'; warnings: string[] }
+  | { status: 'failed'; reason: string }
+  | { status: 'not_sent'; reason: string }
+  | { status: 'unknown'; reason: string };
+
+export interface OutgoingMail {
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  body: string;
+}
+
+export interface KerioClientOptions {
+  credentials: KerioCredentials;
+  network: NetworkConfig;
+  dispatcher: Dispatcher;
+  sendEnabled: boolean;
+}
+
+interface Session {
+  token: string;
+  cookie: string;
+}
+
+function describeErrors(errors: KerioError[]): string {
+  return errors.map((error) => `${error.message ?? 'Unknown error'} (code: ${error.code ?? 'N/A'})`).join('; ');
 }
 
 export class KerioClient {
-  private server: string;
-  private username: string;
-  private password: string;
-  private verifySsl: boolean;
-  private apiUrl: string;
-
-  private sessionToken: string | null = null;
-  private sessionCookie: string | null = null; // SESSION_CONNECT_WEBMAIL cookie
+  private readonly apiUrl: string;
+  private readonly credentials: KerioCredentials;
+  private readonly dispatcher: Dispatcher;
+  public readonly sendEnabled: boolean;
+  private session: Session | null = null;
+  private pendingLogin: Promise<Session> | null = null;
   private requestId = 1;
 
-  constructor(config: KerioConfig) {
-    this.server = config.server.replace(/\/$/, ''); // Remove trailing slash
-    this.username = config.username;
-    this.password = config.password;
-    this.verifySsl = config.verifySsl ?? false;
+  constructor(options: KerioClientOptions) {
+    assertServerAllowed(options.credentials.server, options.network);
+    this.credentials = options.credentials;
+    this.apiUrl = `${options.credentials.server.replace(/\/$/, '')}/webmail/api/jsonrpc`;
+    this.dispatcher = options.dispatcher;
+    this.sendEnabled = options.sendEnabled;
+  }
 
-    // Kerio Connect JSON-RPC endpoint
-    this.apiUrl = `${this.server}/webmail/api/jsonrpc`;
+  /** Logs in (or reuses the current session). Throws KerioLoginError for rejected credentials. */
+  public async ensureAuthenticated(): Promise<void> {
+    await this.getSession();
+  }
+
+  public async getMailFolders(): Promise<KerioFolder[]> {
+    const result = await this.read<{ list: KerioFolder[] }>('Folders.get', {});
+    return result.list.filter((folder) => folder.type === 'FMail');
+  }
+
+  /** One page of mails from the given folders, newest first. totalItems counts all matches. */
+  public async getMails(
+    folderIds: string[],
+    page: { start: number; limit: number; conditions?: SearchCondition[] }
+  ): Promise<MailsGetResult> {
+    const query: Record<string, unknown> = {
+      fields: MAIL_LIST_FIELDS,
+      start: page.start,
+      limit: page.limit,
+      orderBy: [{ columnName: 'receiveDate', direction: 'Desc', caseSensitive: true }],
+    };
+    if (page.conditions && page.conditions.length > 0) {
+      query.conditions = page.conditions;
+      query.combining = 'And';
+    }
+    const result = await this.read<MailsGetResult>('Mails.get', { folderIds, query });
+    return { list: result.list ?? [], totalItems: result.totalItems ?? 0 };
+  }
+
+  /** Fetches mails directly by ID (works for any age of message). */
+  public async getMailsById(ids: string[]): Promise<MailsGetByIdResult> {
+    const result = await this.read<MailsGetByIdResult>('Mails.getById', { ids });
+    return { result: result.result ?? [], errors: result.errors ?? [] };
   }
 
   /**
-   * Generic JSON-RPC request
+   * Sends one plain-text mail. Never retried: an unclear result is reported as "unknown".
    */
-  private async jsonRpcRequest<T>(
-    method: string,
-    params: any = {},
-    requiresAuth = true
-  ): Promise<T> {
-    // Ensure authentication if required
-    if (requiresAuth && !this.sessionToken) {
-      await this.login();
+  public async sendMail(mail: OutgoingMail): Promise<SendOutcome> {
+    if (!this.sendEnabled) {
+      throw new KerioPolicyError('Sending e-mail is disabled for this connection.');
     }
 
-    const payload: JsonRpcRequest = {
-      jsonrpc: '2.0',
-      method,
-      params,
-      id: this.requestId++,
+    const toAddresses = (list: string[] = []) => list.map((address) => ({ address, name: '' }));
+    const params = {
+      mails: [{
+        send: true,
+        ...(this.credentials.username.includes('@') ? { from: { address: this.credentials.username, name: '' } } : {}),
+        to: toAddresses(mail.to),
+        cc: toAddresses(mail.cc),
+        bcc: toAddresses(mail.bcc),
+        subject: mail.subject,
+        displayableParts: [{ contentType: 'ctTextPlain', content: mail.body }],
+      }],
     };
+
+    // Renew an expired session with a harmless read first, so the send itself needs no retry.
+    await this.read('Folders.get', {});
+
+    let result: MailsCreateResult;
+    try {
+      result = await this.post<MailsCreateResult>(SEND_METHOD, params, this.session);
+    } catch (error) {
+      if (error instanceof KerioTransportError) {
+        return error.mayHaveReachedServer
+          ? { status: 'unknown', reason: error.message }
+          : { status: 'not_sent', reason: error.message };
+      }
+      if (error instanceof KerioSessionError) {
+        return { status: 'not_sent', reason: `Kerio session was not accepted: ${error.message}` };
+      }
+      if (error instanceof KerioApiError) {
+        return { status: 'failed', reason: error.message };
+      }
+      throw error;
+    }
+
+    const errors = result.errors ?? [];
+    if (errors.length === 0) {
+      return { status: 'sent' };
+    }
+    const partialSuccess = errors.some((error) => /partial/i.test(`${error.code ?? ''} ${error.message ?? ''}`));
+    if (partialSuccess) {
+      return { status: 'sent_with_warnings', warnings: errors.map((error) => error.message ?? String(error.code)) };
+    }
+    return { status: 'failed', reason: describeErrors(errors) };
+  }
+
+  /** Read request: allowlisted, repeated once after session renewal or a network error. */
+  private async read<T>(method: string, params: unknown): Promise<T> {
+    if (!READ_METHODS.has(method)) {
+      throw new KerioPolicyError(`Kerio API method ${method} is not allowed`);
+    }
+
+    const session = await this.getSession();
+    try {
+      return await this.post<T>(method, params, session);
+    } catch (error) {
+      if (error instanceof KerioSessionError) {
+        this.dropSession(session);
+      } else if (!(error instanceof KerioTransportError)) {
+        throw error;
+      }
+      return this.post<T>(method, params, await this.getSession());
+    }
+  }
+
+  private dropSession(session: Session): void {
+    if (this.session === session) this.session = null;
+  }
+
+  private async getSession(): Promise<Session> {
+    if (this.session) return this.session;
+    if (!this.pendingLogin) {
+      this.pendingLogin = this.login().finally(() => {
+        this.pendingLogin = null;
+      });
+    }
+    return this.pendingLogin;
+  }
+
+  private async login(): Promise<Session> {
+    const params = {
+      userName: this.credentials.username,
+      password: this.credentials.password,
+      application: { name: 'Kerio MCP Server', vendor: 'MCP', version: PACKAGE_VERSION },
+    };
+
+    let token: string | undefined;
+    let cookie: string | undefined;
+    try {
+      const result = await this.post<{ token?: string }>('Session.login', params, null, (headers) => {
+        const setCookie = headers['set-cookie'];
+        for (const value of Array.isArray(setCookie) ? setCookie : [setCookie ?? '']) {
+          cookie = value.match(/SESSION_CONNECT_WEBMAIL=([^;]+)/)?.[1] ?? cookie;
+        }
+      });
+      token = result.token;
+    } catch (error) {
+      if (error instanceof KerioApiError) {
+        throw new KerioLoginError(`Kerio login failed: ${error.message}`, error.code);
+      }
+      throw error;
+    }
+
+    if (!token || !cookie) {
+      throw new KerioLoginError('Kerio login failed: the server did not return a session');
+    }
+    this.session = { token, cookie };
+    return this.session;
+  }
+
+  private async post<T>(
+    method: string,
+    params: unknown,
+    session: Session | null,
+    onHeaders?: (headers: Record<string, string | string[] | undefined>) => void
+  ): Promise<T> {
+    if (method === SEND_METHOD) {
+      this.assertOutgoingMail(params);
+    } else if (method !== 'Session.login' && !READ_METHODS.has(method)) {
+      throw new KerioPolicyError(`Kerio API method ${method} is not allowed`);
+    }
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'X-Requested-With': 'XMLHttpRequest',
     };
-
-    // Add authentication headers if we have a session
-    if (this.sessionToken && this.sessionCookie) {
-      // Cookie header needs the SESSION_CONNECT_WEBMAIL cookie
-      headers['Cookie'] = `SESSION_CONNECT_WEBMAIL=${this.sessionCookie}`;
-      // X-Token header uses the token from the response body
-      headers['X-Token'] = this.sessionToken;
+    if (session) {
+      headers['Cookie'] = `SESSION_CONNECT_WEBMAIL=${session.cookie}`;
+      headers['X-Token'] = session.token;
     }
 
+    let response: Dispatcher.ResponseData;
     try {
-      const response = await request(this.apiUrl, {
+      response = await request(this.apiUrl, {
         method: 'POST',
         headers,
-        body: JSON.stringify(payload),
-        // Disable SSL verification if configured (for self-signed certs)
-        ...(this.verifySsl ? {} : {
-          // @ts-ignore - undici specific option
-          connect: { rejectUnauthorized: false }
-        }),
+        body: JSON.stringify({ jsonrpc: '2.0', id: this.requestId++, method, params }),
+        dispatcher: this.dispatcher,
       });
-
-      const data = (await response.body.json()) as JsonRpcResponse<T>;
-
-      // Extract session token and cookies from login response
-      if (method === 'Session.login') {
-        // Extract token from response body (this is the X-Token we'll use)
-        if (data.result && typeof data.result === 'object') {
-          const resultObj = data.result as any;
-          if (resultObj.token) {
-            this.sessionToken = resultObj.token;
-          }
-        }
-
-        // Extract SESSION_CONNECT_WEBMAIL cookie
-        if (response.headers['set-cookie']) {
-          const cookies = Array.isArray(response.headers['set-cookie'])
-            ? response.headers['set-cookie']
-            : [response.headers['set-cookie']];
-
-          for (const cookie of cookies) {
-            const sessionMatch = cookie.match(/SESSION_CONNECT_WEBMAIL=([^;]+)/);
-            if (sessionMatch) {
-              this.sessionCookie = sessionMatch[1];
-            }
-          }
-        }
-      }
-
-      if (data.error) {
-        throw new Error(
-          `Kerio API Error: ${data.error.message} (code: ${data.error.code})`
-        );
-      }
-
-      if (!data.result) {
-        throw new Error('No result in response');
-      }
-
-      // Check for errors in result.errors (Kerio sometimes returns errors here instead of top-level)
-      if (typeof data.result === 'object' && data.result !== null) {
-        const resultObj = data.result as any;
-        if (Array.isArray(resultObj.errors) && resultObj.errors.length > 0) {
-          const errorMessages = resultObj.errors.map((err: any) => {
-            const msg = err.message || 'Unknown error';
-            const code = err.code || 'N/A';
-            return `${msg} (code: ${code})`;
-          }).join('; ');
-          throw new Error(`Kerio API Error: ${errorMessages}`);
-        }
-      }
-
-      return data.result;
     } catch (error) {
-      if (error instanceof Error) {
-        throw new Error(`Kerio API request failed: ${error.message}`);
-      }
-      throw error;
+      throw toTransportError(error);
     }
-  }
 
-  /**
-   * Authenticate with Kerio Connect
-   */
-  private async login(): Promise<void> {
-    console.error('[Client] Authenticating...');
+    onHeaders?.(response.headers);
 
-    const params: SessionLoginParams = {
-      userName: this.username,
-      password: this.password,
-      application: {
-        name: 'Kerio MCP Server',
-        vendor: 'MCP',
-        version: PACKAGE_VERSION,
-      },
-    };
-
+    let data: JsonRpcResponse<T>;
     try {
-      await this.jsonRpcRequest<SessionLoginResult>('Session.login', params, false);
-
-      if (!this.sessionToken || !this.sessionCookie) {
-        throw new Error(
-          `Failed to extract session credentials: ` +
-          `Token=${this.sessionToken ? 'OK' : 'MISSING'}, ` +
-          `Cookie=${this.sessionCookie ? 'OK' : 'MISSING'}`
-        );
-      }
-
-      console.error('[Client] ✅ Authentication successful');
+      data = (await response.body.json()) as JsonRpcResponse<T>;
     } catch (error) {
-      console.error('[Client] ❌ Authentication failed');
-      if (error instanceof Error) {
-        console.error(`[Client] Error: ${error.message}`);
+      if (response.statusCode === 401) {
+        throw new KerioSessionError('Kerio session is not valid (HTTP 401)');
       }
-      throw error;
-    }
-  }
-
-  /**
-   * Get all note folders dynamically (filters out non-note folders)
-   */
-  public async getNoteFolders(): Promise<KerioFolder[]> {
-    const result = await this.jsonRpcRequest<FoldersGetResult>('Folders.get', {});
-
-    // Filter to only note folders (exclude mail, tasks, contacts, calendar)
-    const noteFolders = result.list.filter((folder) => folder.type === 'FNote');
-
-    return noteFolders;
-  }
-
-  /**
-   * Get notes from specific folder(s) with query options
-   */
-  public async getNotes(
-    folderIds: string[],
-    query: Query = {}
-  ): Promise<KerioNote[]> {
-    const params = {
-      query: {
-        start: query.start ?? 0,
-        limit: query.limit ?? -1, // -1 = all notes
-        orderBy: query.orderBy ?? [
-          {
-            columnName: 'createDate',
-            direction: 'Desc',
-            caseSensitive: true,
-          },
-        ],
-      },
-      folderIds,
-    };
-
-    const result = await this.jsonRpcRequest<NotesGetResult>('Notes.get', params);
-    return result.list;
-  }
-
-  /**
-   * Get count of notes in a folder
-   */
-  public async getNoteCount(folderId: string): Promise<number> {
-    const params = {
-      query: { start: 0, limit: 0 }, // We only want the count
-      folderIds: [folderId],
-    };
-
-    const result = await this.jsonRpcRequest<NotesGetResult>('Notes.get', params);
-    return result.totalItems;
-  }
-
-  /**
-   * Search notes across folders
-   */
-  public async searchNotes(
-    searchQuery: string,
-    folderIds?: string[],
-    searchIn: 'text' | 'subject' | 'both' = 'both',
-    limit = -1
-  ): Promise<SearchResult> {
-    // If no folders specified, search all note folders
-    const folders = folderIds ?? (await this.getNoteFolders()).map((f) => f.id);
-
-    // Get ALL notes from target folders (don't apply limit yet - need to search all first)
-    const allNotes = await this.getNotes(folders, { limit: -1 });
-
-    // Client-side filtering (Kerio API doesn't support text search)
-    const lowerQuery = searchQuery.toLowerCase();
-    const filtered = allNotes.filter((note) => {
-      const matchSubject = searchIn !== 'text' &&
-        note.subject?.toLowerCase().includes(lowerQuery);
-      const matchText = searchIn !== 'subject' &&
-        note.text?.toLowerCase().includes(lowerQuery);
-
-      return matchSubject || matchText;
-    });
-
-    // Apply limit to search results (not to initial fetch)
-    const results = limit > 0 ? filtered.slice(0, limit) : filtered;
-
-    return {
-      notes: results,
-      totalFound: filtered.length, // Total found (before limit)
-      searchedFolders: folders,
-    };
-  }
-
-  /**
-   * Search tasks across folders (server-side filtering)
-   */
-  public async searchTasks(
-    searchQuery: string,
-    folderIds?: string[],
-    searchIn: 'summary' | 'description' | 'both' = 'both',
-    limit = -1
-  ): Promise<{ tasks: any[]; totalFound: number; searchedFolders: string[] }> {
-    // If no folders specified, search all task folders
-    const folders = folderIds ?? (await this.getTaskFolders()).map((f) => f.id);
-
-    // Get ALL tasks from target folders (don't apply limit yet - need to search all first)
-    const allTasks = await this.getTasks(folders, { limit: -1 });
-
-    // Client-side filtering (Kerio API doesn't support text search)
-    const lowerQuery = searchQuery.toLowerCase();
-    const filtered = allTasks.filter((task) => {
-      const matchSummary = searchIn !== 'description' &&
-        task.summary?.toLowerCase().includes(lowerQuery);
-      const matchDescription = searchIn !== 'summary' &&
-        task.description?.toLowerCase().includes(lowerQuery);
-
-      return matchSummary || matchDescription;
-    });
-
-    // Apply limit to search results (not to initial fetch)
-    const results = limit > 0 ? filtered.slice(0, limit) : filtered;
-
-    return {
-      tasks: results,
-      totalFound: filtered.length, // Total found (before limit)
-      searchedFolders: folders,
-    };
-  }
-
-  /**
-   * Create a new note
-   */
-  public async createNote(
-    folderId: string,
-    text: string,
-    subject?: string,
-    color?: string
-  ): Promise<void> {
-    // Auto-generate subject from first line if not provided
-    const noteSubject = subject || text.split('\n')[0].substring(0, 100);
-
-    const params = {
-      notes: [
-        {
-          folderId,
-          subject: noteSubject,
-          text,
-          ...(color && { color }),
-        },
-      ],
-    };
-
-    await this.jsonRpcRequest('Notes.create', params);
-  }
-
-  /**
-   * Move note to different folder (soft delete pattern)
-   */
-  public async moveNote(noteId: string, targetFolderId: string): Promise<void> {
-    const params = {
-      notes: [
-        {
-          id: noteId,
-          folderId: targetFolderId,
-        },
-      ],
-    };
-
-    await this.jsonRpcRequest('Notes.set', params);
-  }
-
-  /**
-   * Remove note permanently (hard delete)
-   */
-  public async removeNote(noteId: string): Promise<void> {
-    const params = {
-      ids: [noteId],
-    };
-
-    await this.jsonRpcRequest('Notes.remove', params);
-  }
-
-  /**
-   * Update note content (subject and/or text)
-   */
-  public async updateNote(
-    noteId: string,
-    subject?: string,
-    text?: string
-  ): Promise<void> {
-    const updateData: any = { id: noteId };
-
-    if (subject !== undefined) {
-      updateData.subject = subject;
+      throw new KerioTransportError(`Unexpected response from Kerio (HTTP ${response.statusCode})`, true);
     }
 
-    if (text !== undefined) {
-      updateData.text = text;
-      // Auto-generate subject from first line if text provided but subject not
-      if (subject === undefined) {
-        updateData.subject = text.split('\n')[0].substring(0, 100);
+    if (data.error) {
+      const message = `Kerio API error: ${data.error.message} (code: ${data.error.code})`;
+      if (SESSION_ERROR_CODES.has(data.error.code) || response.statusCode === 401) {
+        throw new KerioSessionError(message, data.error.code);
       }
+      throw new KerioApiError(message, data.error.code);
     }
-
-    const params = {
-      notes: [updateData],
-    };
-
-    await this.jsonRpcRequest('Notes.set', params);
-  }
-
-  /**
-   * Create a new folder
-   */
-  public async createFolder(
-    name: string,
-    type: 'FNote' | 'FTask' | 'FContact' | 'FCalendar' | 'FMail' = 'FNote',
-    parentId?: string
-  ): Promise<void> {
-    const folderData: any = {
-      name,
-      type,
-      ...(parentId && { parentId }),
-    };
-
-    // Mail folders require additional fields
-    if (type === 'FMail') {
-      if (!parentId) {
-        throw new Error('parentId is required for mail folders');
-      }
-      folderData.id = '';
-      folderData.placeType = 'FPlaceMailbox';
-      folderData.access = 'FAccessAdmin';
-      folderData.ownerName = '';
-      folderData.subType = 'FSubNone';
-      folderData.checked = false;
-      folderData.color = '';
+    if (data.result === undefined || data.result === null) {
+      throw new KerioTransportError(`Kerio returned no result (HTTP ${response.statusCode})`, true);
     }
-
-    const params = {
-      folders: [folderData],
-    };
-
-    await this.jsonRpcRequest('Folders.create', params);
+    return data.result;
   }
 
-  /**
-   * Get folder information with note counts
-   */
-  public async getFolderInfo(): Promise<FolderInfo[]> {
-    const folders = await this.getNoteFolders();
-
-    // Get counts in parallel
-    const counts = await Promise.all(
-      folders.map((folder) => this.getNoteCount(folder.id))
-    );
-
-    return folders.map((folder, index) => ({
-      id: folder.id,
-      name: folder.name,
-      noteCount: counts[index],
-      type: folder.type,
-    }));
-  }
-
-  /**
-   * Get all folders of all types
-   */
-  public async getAllFolders(): Promise<KerioFolder[]> {
-    const result = await this.jsonRpcRequest<FoldersGetResult>('Folders.get', {});
-    return result.list;
-  }
-
-  // ============================================================================
-  // TASKS MODULE METHODS
-  // ============================================================================
-
-  /**
-   * Get task folders (filters Folders.get to FTask type)
-   */
-  public async getTaskFolders(): Promise<KerioFolder[]> {
-    const result = await this.jsonRpcRequest<FoldersGetResult>('Folders.get', {});
-    return result.list.filter((folder) => folder.type === 'FTask');
-  }
-
-  /**
-   * Get tasks from specific folder(s)
-   */
-  public async getTasks(
-    folderIds: string[],
-    query: Query = {}
-  ): Promise<KerioTask[]> {
-    const params = {
-      query: {
-        start: query.start ?? 0,
-        limit: query.limit ?? 500,
-        orderBy: query.orderBy ?? [
-          {
-            columnName: 'due',
-            direction: 'Asc',
-            caseSensitive: true,
-          },
-        ],
-      },
-      folderIds,
-    };
-
-    const result = await this.jsonRpcRequest<TasksGetResult>('Tasks.get', params);
-    return result.list;
-  }
-
-  /**
-   * Create a new task
-   */
-  public async createTask(
-    folderId: string,
-    summary: string,
-    description?: string,
-    due?: string,
-    reminder?: { type: 'ReminderAbsolute' | 'ReminderRelative'; date?: string; minutesBeforeStart?: number }
-  ): Promise<void> {
-    const params = {
-      tasks: [
-        {
-          folderId,
-          summary,
-          description: description ?? '',
-          due: due ?? '',
-          done: 0,
-          reminder: reminder ? {
-            isSet: true,
-            ...reminder
-          } : undefined,
-        },
-      ],
-    };
-
-    await this.jsonRpcRequest('Tasks.create', params);
-  }
-
-  /**
-   * Update task (can be used to mark complete with done=100)
-   */
-  public async updateTask(
-    taskId: string,
-    updates: {
-      summary?: string;
-      description?: string;
-      due?: string;
-      done?: number;
+  /** Mails.create is only allowed for sending exactly one new mail, never for drafts or templates. */
+  private assertOutgoingMail(params: unknown): void {
+    if (!this.sendEnabled) {
+      throw new KerioPolicyError('Sending e-mail is disabled for this connection.');
     }
-  ): Promise<void> {
-    const params = {
-      tasks: [
-        {
-          id: taskId,
-          ...updates,
-        },
-      ],
-    };
-
-    await this.jsonRpcRequest('Tasks.set', params);
-  }
-
-  // ============================================================================
-  // MAIL MODULE METHODS
-  // ============================================================================
-
-  /**
-   * Get mail folders (filters Folders.get to FMail type)
-   */
-  public async getMailFolders(): Promise<KerioFolder[]> {
-    const result = await this.jsonRpcRequest<FoldersGetResult>('Folders.get', {});
-    return result.list.filter((folder) => folder.type === 'FMail');
-  }
-
-  /**
-   * Get emails from specific folder(s)
-   */
-  public async getMails(
-    folderIds: string[],
-    query: Query = {},
-    includeContent: boolean = false
-  ): Promise<KerioMail[]> {
-    const fields = [
-      'id', 'from', 'to', 'cc', 'bcc', 'subject', 'receiveDate',
-      'sendDate', 'modifiedDate', 'isSeen', 'isJunk', 'isAnswered',
-      'isForwarded', 'isFlagged', 'isReadOnly', 'isDraft',
-      'hasAttachment', 'priority', 'size', 'folderId'
-    ];
-
-    // Include email body content if requested (for mails_get)
-    if (includeContent) {
-      fields.push('displayableParts');
-    }
-
-    const params: any = {
-      query: {
-        fields,
-        start: query.start ?? 0,
-        limit: query.limit ?? 50,
-        orderBy: query.orderBy ?? [{
-          columnName: 'receiveDate',
-          direction: 'Desc',
-          caseSensitive: true,
-        }],
-      },
-      folderIds,
-    };
-
-    // Add conditions if provided (for search)
-    if (query.conditions && query.conditions.length > 0) {
-      params.query.conditions = query.conditions;
-      params.query.combining = query.combining ?? 'And';
-    }
-
-    const result = await this.jsonRpcRequest<MailsGetResult>('Mails.get', params);
-    return result.list;
-  }
-
-  /**
-   * Search emails using QUICKSEARCH (full-text search across subject, from, to, body, etc.)
-   */
-  public async searchMails(
-    searchQuery: string,
-    options?: {
-      folderIds?: string[];
-      limit?: number;
-    }
-  ): Promise<KerioMail[]> {
-    // Get all mail folders if not specified
-    const folderIds = options?.folderIds ?? (await this.getMailFolders()).map((f) => f.id);
-
-    return this.getMails(folderIds, {
-      limit: options?.limit ?? 50,
-      conditions: [
-        {
-          fieldName: 'QUICKSEARCH',
-          comparator: 'Like',
-          value: searchQuery,
-        },
-      ],
-      combining: 'And',
-    });
-  }
-
-  /**
-   * Get specific email by ID with full content
-   *
-   * Mail ID format: keriostorage://mail/{domain}/{user}/{folder_uuid}/{mail_id}
-   * Example: keriostorage://mail/xceptus.de/ni/7a8cfe21-59ba-4148-8bc4-e46287604075/74860
-   *
-   * Split result: ['keriostorage:', '', 'mail', 'xceptus.de', 'ni', '7a8cfe21...', '74860']
-   * Indices:       [0]             [1]  [2]     [3]          [4]   [5]              [6]
-   */
-  public async getMailById(mailId: string): Promise<KerioMail> {
-    // Extract folder ID from mail ID
-    // Mail: keriostorage://mail/domain/user/folder_uuid/mail_id
-    // Folder: keriostorage://folder/domain/user/folder_uuid
-    const mailParts = mailId.split('/');
-
-    // Need at least 7 parts: ['keriostorage:', '', 'mail', domain, user, folder_uuid, mail_id]
-    if (mailParts.length < 7) {
-      throw new Error(
-        `Invalid mail ID format: ${mailId}\n` +
-        `Expected: keriostorage://mail/{domain}/{user}/{folder_uuid}/{mail_id}\n` +
-        `Got ${mailParts.length} parts, need at least 7`
-      );
-    }
-
-    // Correct indexing (accounting for empty string at index 1 after 'keriostorage:')
-    const domain = mailParts[3];
-    const user = mailParts[4];
-    const folderUuid = mailParts[5];
-
-    const folderId = `keriostorage://folder/${domain}/${user}/${folderUuid}`;
-
-    console.error(`[Client] Fetching email ${mailId} from folder ${folderId}`);
-
-    // Get all mails from this folder with content, then filter by ID
-    const mails = await this.getMails(
-      [folderId],
-      { limit: 500 }, // Increase limit to find the specific email
-      true // Include content
-    );
-
-    const mail = mails.find((m) => m.id === mailId);
-    if (!mail) {
-      throw new Error(
-        `Email not found: ${mailId}\n` +
-        `Searched in folder: ${folderId}\n` +
-        `Found ${mails.length} emails in folder, but none matched the ID.`
-      );
-    }
-
-    return mail;
-  }
-
-  /**
-   * Send an email
-   */
-  public async sendMail(
-    to: EmailAddress[],
-    subject: string,
-    content: string,
-    contentType: 'ctTextPlain' | 'ctTextHtml' = 'ctTextHtml',
-    options?: {
-      cc?: EmailAddress[];
-      bcc?: EmailAddress[];
-      priority?: 'Low' | 'Normal' | 'High';
-      attachments?: any[];
-    }
-  ): Promise<void> {
-    // Get sender info from username
-    const from: EmailAddress = {
-      address: this.username,
-      name: '',
-    };
-
-    const params = {
-      mails: [{
-        send: true,
-        subject,
-        from,
-        to,
-        cc: options?.cc ?? [],
-        bcc: options?.bcc ?? [],
-        replyTo: [from],
-        displayableParts: [{
-          contentType,
-          content,
-        }],
-        priority: options?.priority ?? 'Normal',
-        attachments: options?.attachments ?? [],
-        encrypt: false,
-        sign: false,
-        requestDSN: false,
-      }],
-    };
-
-    await this.jsonRpcRequest('Mails.create', params);
-  }
-
-  /**
-   * Save email as draft
-   */
-  public async saveDraft(
-    to: EmailAddress[],
-    subject: string,
-    content: string,
-    contentType: 'ctTextPlain' | 'ctTextHtml' = 'ctTextHtml',
-    options?: {
-      cc?: EmailAddress[];
-      bcc?: EmailAddress[];
-      priority?: 'Low' | 'Normal' | 'High';
-    }
-  ): Promise<void> {
-    const from: EmailAddress = {
-      address: this.username,
-      name: '',
-    };
-
-    const params = {
-      mails: [{
-        send: false, // Save as draft
-        subject,
-        from,
-        to,
-        cc: options?.cc ?? [],
-        bcc: options?.bcc ?? [],
-        replyTo: [from],
-        displayableParts: [{
-          contentType,
-          content,
-        }],
-        priority: options?.priority ?? 'Normal',
-        attachments: [],
-        encrypt: false,
-        sign: false,
-        requestDSN: false,
-      }],
-    };
-
-    await this.jsonRpcRequest('Mails.create', params);
-  }
-
-  /**
-   * Move email to different folder
-   */
-  public async moveMail(mailIds: string[], targetFolderId: string): Promise<void> {
-    const params = {
-      ids: mailIds,
-      folder: targetFolderId,
-    };
-
-    console.error('[Client] Moving emails:', JSON.stringify({
-      count: mailIds.length,
-      targetFolder: targetFolderId,
-      mailIds: mailIds
-    }, null, 2));
-
-    await this.jsonRpcRequest('Mails.move', params);
-    console.error('[Client] Emails moved successfully');
-  }
-
-  /**
-   * Update email properties (mark as read/unread, flag, etc.) - supports batch operations
-   */
-  public async setMailProperties(
-    mailIds: string | string[],
-    properties: {
-      isSeen?: boolean;
-      isFlagged?: boolean;
-      isJunk?: boolean;
-    }
-  ): Promise<void> {
-    // Ensure mailIds is an array
-    const ids = Array.isArray(mailIds) ? mailIds : [mailIds];
-
-    const params = {
-      mails: ids.map(id => ({
-        id,
-        ...properties,
-      })),
-    };
-
-    console.error('[Client] Setting mail properties:', JSON.stringify(params, null, 2));
-    await this.jsonRpcRequest('Mails.set', params);
-    console.error('[Client] Mail properties updated successfully');
-  }
-
-  /**
-   * Update a draft email (edit subject, body, recipients, etc.)
-   */
-  public async updateDraft(
-    draftId: string,
-    updates: {
-      subject?: string;
-      body?: string;
-      contentType?: 'ctTextHtml' | 'ctTextPlain';
-      to?: EmailAddress[];
-      cc?: EmailAddress[];
-      bcc?: EmailAddress[];
-      priority?: 'Low' | 'Normal' | 'High';
-    }
-  ): Promise<void> {
-    // First, get the current draft to preserve fields not being updated
-    const currentDraft = await this.getMailById(draftId);
-
-    // Build the updated mail object
-    const updatedMail: any = {
-      id: draftId,
-      folderId: currentDraft.folderId,
-      send: false,
-      isDraft: true,
-    };
-
-    // Update fields if provided
-    if (updates.subject !== undefined) {
-      updatedMail.subject = updates.subject;
-    } else if (currentDraft.subject) {
-      updatedMail.subject = currentDraft.subject;
-    }
-
-    if (updates.to !== undefined) {
-      updatedMail.to = updates.to;
-    } else if (currentDraft.to) {
-      updatedMail.to = currentDraft.to;
-    }
-
-    if (updates.cc !== undefined) {
-      updatedMail.cc = updates.cc;
-    } else if (currentDraft.cc) {
-      updatedMail.cc = currentDraft.cc;
-    }
-
-    if (updates.bcc !== undefined) {
-      updatedMail.bcc = updates.bcc;
-    } else if (currentDraft.bcc) {
-      updatedMail.bcc = currentDraft.bcc;
-    }
-
-    if (updates.priority !== undefined) {
-      updatedMail.priority = updates.priority;
-    } else if (currentDraft.priority) {
-      updatedMail.priority = currentDraft.priority;
-    } else {
-      updatedMail.priority = 'Normal';
-    }
-
-    // Update body and content type
-    if (updates.body !== undefined || updates.contentType !== undefined) {
-      const contentType = updates.contentType ||
-        (currentDraft.displayableParts?.[0]?.contentType || 'ctTextHtml');
-      const body = updates.body !== undefined ? updates.body :
-        (currentDraft.displayableParts?.[0]?.content || '');
-
-      updatedMail.displayableParts = [{
-        contentType,
-        content: body,
-      }];
-    } else if (currentDraft.displayableParts) {
-      updatedMail.displayableParts = currentDraft.displayableParts;
-    }
-
-    // Preserve other required fields
-    updatedMail.from = currentDraft.from;
-    updatedMail.replyTo = currentDraft.replyTo || [currentDraft.from];
-    updatedMail.headers = currentDraft.headers || [];
-    updatedMail.attachments = currentDraft.attachments || [];
-
-    const params = {
-      mails: [updatedMail],
-    };
-
-    console.error('[Client] Updating draft:', JSON.stringify(params, null, 2));
-    await this.jsonRpcRequest('Mails.set', params);
-    console.error('[Client] Draft updated successfully');
-  }
-
-  // ============================================================================
-  // CONTACTS MODULE METHODS
-  // ============================================================================
-
-  /**
-   * Get contact folders (filters Folders.get to FContact type)
-   */
-  public async getContactFolders(): Promise<KerioFolder[]> {
-    const result = await this.jsonRpcRequest<FoldersGetResult>('Folders.get', {});
-    return result.list.filter((folder) => folder.type === 'FContact');
-  }
-
-  /**
-   * Get contacts from specific folder(s)
-   */
-  public async getContacts(
-    folderIds: string[],
-    query: Query = {}
-  ): Promise<KerioContact[]> {
-    const params = {
-      folderIds,
-      query: {
-        start: query.start ?? 0,
-        limit: query.limit ?? 100,
-        fields: [
-          'id',
-          'folderId',
-          'watermark',
-          'type',
-          'commonName',
-          'titleAfter',
-          'titleBefore',
-          'firstName',
-          'middleName',
-          'surName',
-          'nickName',
-          'emailAddresses',
-          'phoneNumbers',
-          'photo',
-          'companyName',
-          'comment',
-          'postalAddresses',
-          'urls',
-        ],
-      },
-    };
-
-    const result = await this.jsonRpcRequest<ContactsGetResult>('Contacts.getFromCache', params);
-    return result.list;
-  }
-
-  /**
-   * Search contacts across folders (server-side filtering)
-   */
-  public async searchContacts(
-    searchQuery: string,
-    folderIds?: string[],
-    searchIn: 'name' | 'company' | 'email' | 'phone' | 'notes' | 'all' = 'all',
-    limit = -1
-  ): Promise<{ contacts: any[]; totalFound: number; searchedFolders: string[] }> {
-    // If no folders specified, search all contact folders
-    const folders = folderIds ?? (await this.getContactFolders()).map((f) => f.id);
-
-    // Get ALL contacts from target folders (don't apply limit yet - need to search all first)
-    const allContacts = await this.getContacts(folders, { limit: -1 });
-
-    // Client-side filtering (Kerio API doesn't support text search)
-    const lowerQuery = searchQuery.toLowerCase();
-    const filtered = allContacts.filter((contact) => {
-      const matchName = (searchIn === 'name' || searchIn === 'all') &&
-        (contact.commonName?.toLowerCase().includes(lowerQuery) ||
-         contact.firstName?.toLowerCase().includes(lowerQuery) ||
-         contact.middleName?.toLowerCase().includes(lowerQuery) ||
-         contact.surName?.toLowerCase().includes(lowerQuery));
-
-      const matchCompany = (searchIn === 'company' || searchIn === 'all') &&
-        contact.companyName?.toLowerCase().includes(lowerQuery);
-
-      const matchEmail = (searchIn === 'email' || searchIn === 'all') &&
-        contact.emailAddresses?.some((e: any) => e.address?.toLowerCase().includes(lowerQuery));
-
-      const matchPhone = (searchIn === 'phone' || searchIn === 'all') &&
-        contact.phoneNumbers?.some((p: any) => p.number?.toLowerCase().includes(lowerQuery));
-
-      const matchNotes = (searchIn === 'notes' || searchIn === 'all') &&
-        contact.comment?.toLowerCase().includes(lowerQuery);
-
-      return matchName || matchCompany || matchEmail || matchPhone || matchNotes;
-    });
-
-    // Apply limit to search results (not to initial fetch)
-    const results = limit > 0 ? filtered.slice(0, limit) : filtered;
-
-    return {
-      contacts: results,
-      totalFound: filtered.length, // Total found (before limit)
-      searchedFolders: folders,
-    };
-  }
-
-  /**
-   * Get specific contact by ID
-   */
-  public async getContactById(contactId: string): Promise<KerioContact> {
-    const params = {
-      ids: [contactId],
-    };
-
-    const result = await this.jsonRpcRequest<{ errors: any[]; result: KerioContact[] }>(
-      'Contacts.getById',
-      params
-    );
-
-    if (!result.result || result.result.length === 0) {
-      throw new Error(`Contact not found: ${contactId}`);
-    }
-
-    return result.result[0];
-  }
-
-  /**
-   * Create a new contact
-   */
-  public async createContact(
-    folderId: string,
-    commonName: string,
-    options?: {
-      firstName?: string;
-      middleName?: string;
-      surName?: string;
-      phoneNumbers?: PhoneNumber[];
-      emailAddresses?: ContactEmailAddress[];
-      postalAddresses?: PostalAddress[];
-      urls?: ContactUrl[];
-      companyName?: string;
-      comment?: string;
-    }
-  ): Promise<void> {
-    const params = {
-      contacts: [{
-        folderId,
-        watermark: 0,
-        commonName,
-        firstName: options?.firstName,
-        middleName: options?.middleName,
-        surName: options?.surName,
-        phoneNumbers: options?.phoneNumbers ?? [],
-        emailAddresses: options?.emailAddresses ?? [],
-        postalAddresses: options?.postalAddresses ?? [],
-        urls: options?.urls ?? [],
-        companyName: options?.companyName,
-        comment: options?.comment,
-        photo: {},
-      }],
-    };
-
-    await this.jsonRpcRequest('Contacts.create', params);
-  }
-
-  /**
-   * Update an existing contact
-   */
-  public async updateContact(
-    contactId: string,
-    updates: {
-      commonName?: string;
-      firstName?: string;
-      middleName?: string;
-      surName?: string;
-      phoneNumbers?: PhoneNumber[];
-      emailAddresses?: ContactEmailAddress[];
-      postalAddresses?: PostalAddress[];
-      urls?: ContactUrl[];
-      companyName?: string;
-      comment?: string;
-    }
-  ): Promise<void> {
-    const params = {
-      contacts: [{
-        id: contactId,
-        ...updates,
-      }],
-    };
-
-    await this.jsonRpcRequest('Contacts.set', params);
-  }
-
-  // ============================================================================
-  // CALENDAR MODULE METHODS
-  // ============================================================================
-
-  /**
-   * Get all accessible calendar folders, including shared and public folders.
-   */
-  public async getCalendarFolders(): Promise<KerioFolder[]> {
-    const own = await this.jsonRpcRequest<FoldersGetResult>('Folders.get', {});
-    const [shared, publicFolders] = await Promise.all([
-      this.jsonRpcRequest<SharedMailboxResult>('Folders.getSharedMailboxList', {})
-        .catch((error): SharedMailboxResult => {
-          console.error('[Client] Unable to load shared mailboxes:', error);
-          return { mailboxes: [] };
-        }),
-      this.jsonRpcRequest<FoldersGetResult>('Folders.getPublic', {})
-        .catch((error): FoldersGetResult => {
-          console.error('[Client] Unable to load public folders:', error);
-          return { list: [] };
-        }),
-    ]);
-    const mailboxes = shared.mailboxes ?? shared.list ?? [];
-    const loaded = mailboxes.flatMap(({ folders = [], isLoaded = true }) =>
-      isLoaded ? folders : []
-    );
-    const unloaded = await Promise.all(mailboxes
-      .filter(({ isLoaded, mailboxId }) => isLoaded === false && mailboxId)
-      .map(({ mailboxId }) => this.jsonRpcRequest<FoldersGetResult>(
-        'Folders.getShared', { mailboxId }
-      ).catch((error): FoldersGetResult => {
-        console.error(`[Client] Unable to load shared mailbox ${mailboxId}:`, error);
-        return { list: [] };
-      })));
-    const folders = [
-      ...own.list,
-      ...loaded,
-      ...unloaded.flatMap(({ list }) => list),
-      ...publicFolders.list,
-    ].filter((folder) => folder.type === 'FCalendar');
-    return [...new Map(folders.map((folder) => [folder.id, folder])).values()];
-  }
-
-  /**
-   * Get occurrences (events) from specific folder(s) with optional date range filtering
-   */
-  public async getOccurrences(
-    folderIds: string[],
-    options?: {
-      startDate?: string; // YYYYMMDDTHHmmss+ZZZZ
-      endDate?: string; // YYYYMMDDTHHmmss+ZZZZ
-      limit?: number;
-    }
-  ): Promise<KerioOccurrence[]> {
-    const conditions: QueryCondition[] = [];
-
-    if (options?.startDate) {
-      conditions.push({
-        fieldName: 'start',
-        comparator: 'GreaterEq',
-        value: options.startDate,
-      });
-    }
-
-    if (options?.endDate) {
-      conditions.push({
-        fieldName: 'end',
-        comparator: 'LessThan',
-        value: options.endDate,
-      });
-    }
-
-    const params = {
-      query: {
-        fields: [
-          'id', 'eventId', 'folderId', 'watermark', 'access', 'summary', 'location',
-          'description', 'label', 'categories', 'start', 'end', 'travelMinutes',
-          'freeBusy', 'isPrivate', 'isAllDay', 'priority', 'rule', 'attendees',
-          'reminder', 'isException', 'hasReminder', 'isRecurrent', 'isCancelled',
-          'seqNumber', 'modification'
-        ],
-        start: 0,
-        limit: options?.limit ?? -1,
-        combining: 'And' as const,
-        conditions: conditions.length > 0 ? conditions : undefined,
-      },
-      folderIds,
-    };
-
-    const result = await this.jsonRpcRequest<OccurrencesGetResult>('Occurrences.get', params);
-    return result.list;
-  }
-
-  /**
-   * Search calendar events using QUICKSEARCH (full-text search across summary, location, description, etc.)
-   */
-  public async searchCalendar(
-    searchQuery: string,
-    options?: {
-      folderIds?: string[];
-      limit?: number;
-    }
-  ): Promise<KerioOccurrence[]> {
-    // Get all calendar folders if not specified
-    const folderIds = options?.folderIds ?? (await this.getCalendarFolders()).map((f) => f.id);
-
-    // Generate current timestamp in YYYYMMDDTHHmmss+ZZZZ format
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    const seconds = String(now.getSeconds()).padStart(2, '0');
-    const timezoneOffset = -now.getTimezoneOffset();
-    const offsetHours = String(Math.floor(Math.abs(timezoneOffset) / 60)).padStart(2, '0');
-    const offsetMinutes = String(Math.abs(timezoneOffset) % 60).padStart(2, '0');
-    const offsetSign = timezoneOffset >= 0 ? '+' : '-';
-    const searchTime = `${year}${month}${day}T${hours}${minutes}${seconds}${offsetSign}${offsetHours}${offsetMinutes}`;
-
-    const params = {
-      query: {
-        fields: [
-          'id', 'folderId', 'watermark', 'access', 'summary', 'location',
-          'description', 'label', 'categories', 'start', 'end', 'travelMinutes',
-          'freeBusy', 'isPrivate', 'isAllDay', 'priority', 'rule', 'attendees',
-          'reminder', 'isCancelled'
-        ],
-        start: 0,
-        limit: options?.limit ?? 10,
-        combining: 'And' as const,
-        conditions: [
-          {
-            fieldName: 'searchTime',
-            comparator: 'Like' as const,
-            value: searchTime,
-          },
-          {
-            fieldName: 'QUICKSEARCH',
-            comparator: 'Like' as const,
-            value: searchQuery,
-          },
-        ],
-      },
-      folderIds,
-    };
-
-    const result = await this.jsonRpcRequest<OccurrencesGetResult>('Occurrences.get', params);
-    return result.list;
-  }
-
-  /**
-   * Create a new calendar event
-   */
-  public async createEvent(
-    folderId: string,
-    summary: string,
-    start: string, // YYYYMMDDTHHmmss+ZZZZ
-    end: string, // YYYYMMDDTHHmmss+ZZZZ
-    options?: {
-      location?: string;
-      description?: string;
-      attendees?: EventAttendee[];
-      reminderMinutes?: number;
-      isAllDay?: boolean;
-      isPrivate?: boolean;
-      recurrence?: {
-        frequency: 'Daily' | 'Weekly' | 'Monthly' | 'Yearly';
-        interval?: number;
-        endDate?: string; // YYYYMMDDTHHmmss+ZZZZ
-        neverEnds?: boolean;
-      };
-    }
-  ): Promise<void> {
-    // Build reminder if specified
-    let reminder: EventReminder | undefined;
-    if (options?.reminderMinutes !== undefined) {
-      reminder = {
-        isSet: true,
-        type: 'ReminderRelative',
-        minutesBeforeStart: options.reminderMinutes,
-      };
-    }
-
-    // Build recurrence rule if specified
-    let rule: any;
-    if (options?.recurrence) {
-      rule = {
-        isSet: true,
-        frequency: options.recurrence.frequency,
-        endBy: {
-          date: options.recurrence.endDate ?? '',
-          type: options.recurrence.neverEnds !== false ? 'ByRecurrenceNever' : 'ByRecurrenceDate',
-        },
-        preciseBy: {
-          byDay: [],
-          byInterval: options.recurrence.interval ?? 1,
-          byMonth: [],
-          byMonthDay: [],
-          byPosition: [],
-        },
-      };
-    } else {
-      rule = { isSet: false };
-    }
-
-    const params = {
-      events: [{
-        folderId,
-        summary,
-        location: options?.location ?? '',
-        description: options?.description ?? '',
-        label: 'None' as const,
-        access: 'EAccessCreator' as const,
-        attendees: options?.attendees ?? [],
-        freeBusy: 'Busy' as const,
-        isPrivate: options?.isPrivate ?? false,
-        isAllDay: options?.isAllDay ?? false,
-        priority: 'Normal' as const,
-        start,
-        end,
-        isCancelled: false,
-        travelMinutes: 0,
-        watermark: 0,
-        reminder: reminder ?? { isSet: false },
-        rule,
-      }],
-    };
-
-    await this.jsonRpcRequest('Events.create', params);
-  }
-
-  /**
-   * Update an existing occurrence
-   */
-  public async updateOccurrence(
-    occurrenceId: string,
-    eventId: string,
-    folderId: string,
-    updates: {
-      summary?: string;
-      location?: string;
-      description?: string;
-      start?: string;
-      end?: string;
-      attendees?: EventAttendee[];
-      reminderMinutes?: number;
-      modification?: 'modifyThis' | 'modifyAll' | 'modifyFuture';
-    }
-  ): Promise<void> {
-    // Build reminder if specified
-    let reminder: EventReminder | undefined;
-    if (updates.reminderMinutes !== undefined) {
-      reminder = {
-        isSet: true,
-        type: 'ReminderRelative',
-        minutesBeforeStart: updates.reminderMinutes,
-      };
-    }
-
-    const params = {
-      occurrences: [{
-        id: occurrenceId,
-        eventId,
-        folderId,
-        summary: updates.summary,
-        location: updates.location,
-        description: updates.description,
-        start: updates.start,
-        end: updates.end,
-        attendees: updates.attendees,
-        modification: updates.modification ?? 'modifyThis',
-        reminder,
-      }],
-    };
-
-    await this.jsonRpcRequest('Occurrences.set', params);
-  }
-
-  /**
-   * Delete a calendar occurrence (event)
-   * For recurring events, specify modification type:
-   * - modifyThis: delete only this occurrence
-   * - modifyAllFollowing: delete this and all future occurrences
-   * - modifyAll: delete all occurrences (entire series)
-   */
-  public async removeOccurrence(
-    occurrenceId: string,
-    modification: 'modifyThis' | 'modifyAllFollowing' | 'modifyAll' = 'modifyThis'
-  ): Promise<void> {
-    const params = {
-      occurrences: [{
-        id: occurrenceId,
-        modification,
-      }],
-    };
-
-    await this.jsonRpcRequest('Occurrences.remove', params);
-  }
-
-  /**
-   * Delete a task
-   */
-  public async removeTask(taskId: string): Promise<void> {
-    const params = {
-      ids: [taskId],
-    };
-
-    await this.jsonRpcRequest('Tasks.remove', params);
-  }
-
-  /**
-   * Delete a contact
-   */
-  public async removeContact(contactId: string): Promise<void> {
-    const params = {
-      ids: [contactId],
-    };
-
-    await this.jsonRpcRequest('Contacts.remove', params);
-  }
-
-  /**
-   * Ensure client is authenticated
-   */
-  public async ensureAuthenticated(): Promise<void> {
-    if (!this.sessionToken) {
-      await this.login();
+    const mails = (params as { mails?: unknown[] })?.mails;
+    const mail = Array.isArray(mails) && mails.length === 1 ? (mails[0] as Record<string, unknown>) : null;
+    const isPlainOutgoingMail =
+      mail !== null &&
+      mail.send === true &&
+      Object.keys(mail).every((key) => OUTGOING_MAIL_FIELDS.has(key));
+    if (!isPlainOutgoingMail) {
+      throw new KerioPolicyError('Mails.create is only allowed for sending a single new e-mail');
     }
   }
 }

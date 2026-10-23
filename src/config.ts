@@ -1,95 +1,138 @@
 /**
- * Configuration management for Kerio Connect MCP Server
- * Comprehensive support for Mail, Calendar, Contacts, Tasks, and Notes
- * Reads from environment variables (set in Claude Desktop config or .env)
+ * Configuration for the Kerio Connect MCP server, read from environment variables.
+ *
+ * Two transports:
+ * - http  (deployment): users sign in through OAuth with their own Kerio server, login and password.
+ *                       No Kerio credentials live in the server configuration.
+ * - stdio (local use):  one mailbox configured through KERIO_SERVER / KERIO_USERNAME / KERIO_PASSWORD.
  */
 
+import { readFileSync } from 'node:fs';
 import { z } from 'zod';
-import type { KerioConfig } from './types.js';
 
-// Zod schema for environment validation
-const EnvSchema = z.object({
-  KERIO_SERVER: z.string().min(1, 'KERIO_SERVER is required'),
-  KERIO_USERNAME: z.string().email('KERIO_USERNAME must be a valid email'),
-  KERIO_PASSWORD: z.string().min(1, 'KERIO_PASSWORD is required'),
-  KERIO_VERIFY_SSL: z
+/**
+ * Boolean switch that only accepts "true" or "false".
+ * Anything else fails startup, so a typo can never silently enable a feature.
+ */
+const strictBoolean = (name: string) =>
+  z
     .string()
     .optional()
-    .default('false')
-    .transform((val) => val.toLowerCase() === 'true'),
-  KERIO_ENABLE_SEND: z
-    .string()
-    .optional()
-    .default('false')
-    .transform((val) => val.toLowerCase() === 'true'),
+    .transform((value, ctx) => {
+      if (value === undefined || value === '' || value === 'false') return false;
+      if (value === 'true') return true;
+      ctx.addIssue({ code: 'custom', message: `${name} must be "true" or "false"` });
+      return z.NEVER;
+    });
+
+const optionalList = z
+  .string()
+  .optional()
+  .transform((value) =>
+    (value ?? '')
+      .split(',')
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+const CommonEnvSchema = z.object({
+  MCP_TRANSPORT: z.enum(['stdio', 'http']).optional().default('stdio'),
+  KERIO_CA_FILE: z.string().optional(),
+  KERIO_ALLOWED_SERVERS: optionalList,
+  KERIO_ALLOW_PRIVATE_NETWORK: strictBoolean('KERIO_ALLOW_PRIVATE_NETWORK'),
+  KERIO_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().optional().default(30_000),
 });
 
-export class Config {
-  public readonly server: string;
-  public readonly username: string;
-  public readonly password: string;
-  public readonly verifySsl: boolean;
-  public readonly enableSend: boolean;
+const HttpEnvSchema = z.object({
+  PUBLIC_URL: z.string().url('PUBLIC_URL must be the public https URL of this server'),
+  PORT: z.coerce.number().int().positive().optional().default(3000),
+  MCP_TOKEN_KEY: z.string().min(1, 'MCP_TOKEN_KEY is required (generate with: openssl rand -base64 32)'),
+  KERIO_ALLOW_SEND: strictBoolean('KERIO_ALLOW_SEND'),
+});
 
-  constructor() {
-    try {
-      const env = EnvSchema.parse(process.env);
+const StdioEnvSchema = z.object({
+  KERIO_SERVER: z.string().min(1, 'KERIO_SERVER is required'),
+  KERIO_USERNAME: z.string().min(1, 'KERIO_USERNAME is required'),
+  KERIO_PASSWORD: z.string().min(1, 'KERIO_PASSWORD is required'),
+  KERIO_ENABLE_SEND: strictBoolean('KERIO_ENABLE_SEND'),
+});
 
-      this.server = env.KERIO_SERVER;
-      this.username = env.KERIO_USERNAME;
-      this.password = env.KERIO_PASSWORD;
-      this.verifySsl = env.KERIO_VERIFY_SSL;
-      this.enableSend = env.KERIO_ENABLE_SEND;
+export interface NetworkConfig {
+  /** Extra trusted CA certificates (PEM), added to the system roots. */
+  extraCaPem?: string;
+  /** Hostnames users may connect to. Empty means any public host. */
+  allowedServers: string[];
+  /** Allow Kerio servers on loopback/private addresses (local development only). */
+  allowPrivateNetwork: boolean;
+  requestTimeoutMs: number;
+}
 
-      this.logConfig();
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        const messages = error.issues.map((e) => `  - ${e.path.join('.')}: ${e.message}`);
-        throw new Error(
-          `Configuration validation failed:\n${messages.join('\n')}\n\n` +
-          `Required environment variables:\n` +
-          `  - KERIO_SERVER: Kerio Connect server URL (e.g., https://mail.example.com)\n` +
-          `  - KERIO_USERNAME: Your email address\n` +
-          `  - KERIO_PASSWORD: Your password\n` +
-          `  - KERIO_VERIFY_SSL: (optional) Set to 'true' to verify SSL certificates (default: false)\n` +
-          `  - KERIO_ENABLE_SEND: (optional) Set to 'true' to enable email sending (default: false, SECURITY RISK)`
-        );
-      }
-      throw error;
-    }
+export interface HttpConfig {
+  transport: 'http';
+  network: NetworkConfig;
+  publicUrl: URL;
+  port: number;
+  tokenKey: Buffer;
+  /** Master switch: when false, no connection can enable sending. */
+  allowSend: boolean;
+}
+
+export interface StdioConfig {
+  transport: 'stdio';
+  network: NetworkConfig;
+  credentials: { server: string; username: string; password: string };
+  sendEnabled: boolean;
+}
+
+export type AppConfig = HttpConfig | StdioConfig;
+
+function parseOrThrow<T extends z.ZodType>(schema: T, env: NodeJS.ProcessEnv): z.output<T> {
+  const result = schema.safeParse(env);
+  if (!result.success) {
+    const messages = result.error.issues.map((issue) => `  - ${issue.path.join('.')}: ${issue.message}`);
+    throw new Error(`Configuration validation failed:\n${messages.join('\n')}`);
   }
+  return result.data;
+}
 
-  /**
-   * Get configuration as KerioConfig object
-   */
-  public toKerioConfig(): KerioConfig {
+export function parseTokenKey(value: string): Buffer {
+  const key = Buffer.from(value, 'base64');
+  if (key.length !== 32) {
+    throw new Error('MCP_TOKEN_KEY must be 32 random bytes encoded as base64 (openssl rand -base64 32)');
+  }
+  return key;
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  const common = parseOrThrow(CommonEnvSchema, env);
+  const network: NetworkConfig = {
+    extraCaPem: common.KERIO_CA_FILE ? readFileSync(common.KERIO_CA_FILE, 'utf8') : undefined,
+    allowedServers: common.KERIO_ALLOWED_SERVERS,
+    allowPrivateNetwork: common.KERIO_ALLOW_PRIVATE_NETWORK,
+    requestTimeoutMs: common.KERIO_REQUEST_TIMEOUT_MS,
+  };
+
+  if (common.MCP_TRANSPORT === 'http') {
+    const http = parseOrThrow(HttpEnvSchema, env);
     return {
-      server: this.server,
-      username: this.username,
-      password: this.password,
-      verifySsl: this.verifySsl,
+      transport: 'http',
+      network,
+      publicUrl: new URL(http.PUBLIC_URL),
+      port: http.PORT,
+      tokenKey: parseTokenKey(http.MCP_TOKEN_KEY),
+      allowSend: http.KERIO_ALLOW_SEND,
     };
   }
 
-  /**
-   * Log configuration (without sensitive data)
-   */
-  private logConfig(): void {
-    console.error('[Config] Loaded configuration:');
-    console.error(`  Server: ${this.server}`);
-    console.error(`  Username: ${this.username}`);
-    console.error(`  Verify SSL: ${this.verifySsl}`);
-    console.error(`  Enable Send: ${this.enableSend}`);
-
-    if (this.enableSend) {
-      console.error('');
-      console.error('[Config] ⚠️  WARNING: Email sending is ENABLED');
-      console.error('[Config] ⚠️  AI can send emails without manual review!');
-      console.error('[Config] ⚠️  Set KERIO_ENABLE_SEND=false to disable this feature');
-      console.error('');
-    }
-  }
+  const stdio = parseOrThrow(StdioEnvSchema, env);
+  return {
+    transport: 'stdio',
+    network,
+    credentials: {
+      server: stdio.KERIO_SERVER,
+      username: stdio.KERIO_USERNAME,
+      password: stdio.KERIO_PASSWORD,
+    },
+    sendEnabled: stdio.KERIO_ENABLE_SEND,
+  };
 }
-
-// Singleton instance
-export const config = new Config();

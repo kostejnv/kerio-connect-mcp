@@ -1,0 +1,20 @@
+services:
+  kerio-mcp:
+    build: .
+    container_name: kerio-mcp
+    restart: unless-stopped
+    env_file: .env
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Reached only through the reverse proxy (Caddy) on the shared network; no published ports.
+    networks:
+      - shared_net
+
+networks:
+  shared_net:
+    external: true
