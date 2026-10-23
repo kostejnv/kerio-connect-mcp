@@ -11,6 +11,7 @@ import type { NetworkConfig } from './config.js';
 import { assertServerAllowed } from './network.js';
 import { PACKAGE_VERSION } from './version.js';
 import type {
+  DisplayablePart,
   JsonRpcResponse,
   KerioCredentials,
   KerioError,
@@ -23,7 +24,9 @@ import type {
 } from './types.js';
 
 /** API methods the connector may call in read-only mode (besides Session.login). */
-const READ_METHODS = new Set(['Folders.get', 'Mails.get', 'Mails.getById']);
+const READ_METHODS = new Set(['Folders.get', 'Mails.get', 'Mails.getById', 'Mails.getPageWithId']);
+/** Attachments may only be downloaded from this path of the connected Kerio server. */
+const ATTACHMENT_PATH_PREFIX = '/webmail/api/download/attachment/';
 const SEND_METHOD = 'Mails.create';
 const OUTGOING_MAIL_FIELDS = new Set(['send', 'from', 'to', 'cc', 'bcc', 'subject', 'displayableParts']);
 
@@ -73,6 +76,13 @@ export class KerioTransportError extends Error {
   }
 }
 
+export class AttachmentTooLargeError extends Error {
+  constructor(public readonly maxBytes: number) {
+    super(`Attachment is larger than ${Math.round(maxBytes / 1024 / 1024)} MB`);
+    this.name = 'AttachmentTooLargeError';
+  }
+}
+
 // Errors raised before the request body could have been delivered.
 const CONNECT_PHASE_ERROR_CODES = new Set([
   'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'EHOSTUNREACH', 'ENETUNREACH',
@@ -115,7 +125,8 @@ export interface KerioClientOptions {
 
 interface Session {
   token: string;
-  cookie: string;
+  /** Cookie header with all cookies set at login (SESSION_CONNECT_WEBMAIL and any others). */
+  cookies: string;
 }
 
 function describeErrors(errors: KerioError[]): string {
@@ -123,6 +134,7 @@ function describeErrors(errors: KerioError[]): string {
 }
 
 export class KerioClient {
+  private readonly serverOrigin: string;
   private readonly apiUrl: string;
   private readonly credentials: KerioCredentials;
   private readonly dispatcher: Dispatcher;
@@ -134,9 +146,15 @@ export class KerioClient {
   constructor(options: KerioClientOptions) {
     assertServerAllowed(options.credentials.server, options.network);
     this.credentials = options.credentials;
-    this.apiUrl = `${options.credentials.server.replace(/\/$/, '')}/webmail/api/jsonrpc`;
+    this.serverOrigin = new URL(options.credentials.server).origin;
+    this.apiUrl = `${this.serverOrigin}/webmail/api/jsonrpc`;
     this.dispatcher = options.dispatcher;
     this.sendEnabled = options.sendEnabled;
+  }
+
+  /** The login name; the mailbox address when the login is an e-mail address. */
+  public get username(): string {
+    return this.credentials.username;
   }
 
   /** Logs in (or reuses the current session). Throws KerioLoginError for rejected credentials. */
@@ -168,10 +186,44 @@ export class KerioClient {
     return { list: result.list ?? [], totalItems: result.totalItems ?? 0 };
   }
 
-  /** Fetches mails directly by ID (works for any age of message). */
+  /** Fetches mails directly by ID (works for any age of message). Their text is only a short preview. */
   public async getMailsById(ids: string[]): Promise<MailsGetByIdResult> {
     const result = await this.read<MailsGetByIdResult>('Mails.getById', { ids });
     return { result: result.result ?? [], errors: result.errors ?? [] };
+  }
+
+  /** The complete displayable text of one mail, or null if Kerio does not return the mail. */
+  public async getMailBody(mailId: string, folderId: string): Promise<DisplayablePart[] | null> {
+    const result = await this.read<{ list?: KerioMail[] }>('Mails.getPageWithId', {
+      folderIds: [folderId],
+      query: {
+        fields: ['id', 'displayableParts'],
+        limit: 1,
+        orderBy: [{ columnName: 'receiveDate', direction: 'Desc', caseSensitive: true }],
+      },
+      id: mailId,
+    });
+    return result.list?.find((mail) => mail.id === mailId)?.displayableParts ?? null;
+  }
+
+  /**
+   * Downloads an attachment by the URL Kerio reports for it. Only attachment downloads from the
+   * connected server are allowed; the size is capped while reading.
+   */
+  public async downloadAttachment(url: string, maxBytes: number): Promise<Buffer> {
+    const target = new URL(url, this.serverOrigin);
+    if (target.origin !== this.serverOrigin || !target.pathname.startsWith(ATTACHMENT_PATH_PREFIX)) {
+      throw new KerioPolicyError('Attachment URL is not an attachment download of the connected Kerio server');
+    }
+
+    const session = await this.getSession();
+    try {
+      return await this.download(target.href, session, maxBytes);
+    } catch (error) {
+      if (!(error instanceof KerioSessionError)) throw error;
+      this.dropSession(session);
+      return this.download(target.href, await this.getSession(), maxBytes);
+    }
   }
 
   /**
@@ -268,12 +320,13 @@ export class KerioClient {
     };
 
     let token: string | undefined;
-    let cookie: string | undefined;
+    const cookies = new Map<string, string>();
     try {
       const result = await this.post<{ token?: string }>('Session.login', params, null, (headers) => {
         const setCookie = headers['set-cookie'];
         for (const value of Array.isArray(setCookie) ? setCookie : [setCookie ?? '']) {
-          cookie = value.match(/SESSION_CONNECT_WEBMAIL=([^;]+)/)?.[1] ?? cookie;
+          const pair = value.match(/^\s*([^=;\s]+)=([^;]*)/);
+          if (pair) cookies.set(pair[1], pair[2]);
         }
       });
       token = result.token;
@@ -284,11 +337,49 @@ export class KerioClient {
       throw error;
     }
 
-    if (!token || !cookie) {
+    if (!token || !cookies.has('SESSION_CONNECT_WEBMAIL')) {
       throw new KerioLoginError('Kerio login failed: the server did not return a session');
     }
-    this.session = { token, cookie };
+    this.session = { token, cookies: [...cookies].map(([name, value]) => `${name}=${value}`).join('; ') };
     return this.session;
+  }
+
+  private sessionHeaders(session: Session): Record<string, string> {
+    return { Cookie: session.cookies, 'X-Token': session.token };
+  }
+
+  private async download(url: string, session: Session, maxBytes: number): Promise<Buffer> {
+    let response: Dispatcher.ResponseData;
+    try {
+      response = await request(url, { method: 'GET', headers: this.sessionHeaders(session), dispatcher: this.dispatcher });
+    } catch (error) {
+      throw toTransportError(error);
+    }
+
+    if (response.statusCode === 401 || response.statusCode === 403) {
+      await response.body.dump();
+      throw new KerioSessionError(`Kerio refused the download (HTTP ${response.statusCode})`);
+    }
+    if (response.statusCode !== 200) {
+      await response.body.dump();
+      throw new KerioApiError(`Attachment download failed (HTTP ${response.statusCode})`);
+    }
+    if (Number(response.headers['content-length'] ?? 0) > maxBytes) {
+      response.body.destroy();
+      throw new AttachmentTooLargeError(maxBytes);
+    }
+
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > maxBytes) {
+        response.body.destroy();
+        throw new AttachmentTooLargeError(maxBytes);
+      }
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
   }
 
   private async post<T>(
@@ -307,10 +398,7 @@ export class KerioClient {
       'Content-Type': 'application/json',
       'X-Requested-With': 'XMLHttpRequest',
     };
-    if (session) {
-      headers['Cookie'] = `SESSION_CONNECT_WEBMAIL=${session.cookie}`;
-      headers['X-Token'] = session.token;
-    }
+    if (session) Object.assign(headers, this.sessionHeaders(session));
 
     let response: Dispatcher.ResponseData;
     try {

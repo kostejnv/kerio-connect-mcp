@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, beforeEach, describe, test } from 'node:test';
 
 import { connectMcp, makeClient, textOf } from './helpers/clients.mjs';
-import { makeMails, startMockKerio } from './helpers/mock-kerio.mjs';
+import { INBOX, PREVIEW_CHARS, SENT, kerioDate, makeMails, startMockKerio } from './helpers/mock-kerio.mjs';
 
 const PROJECTS = 'keriostorage://folder/example.com/jan/projects';
 const nextOffsetOf = (text) => Number(text.match(/nextOffset: (\d+)/)?.[1] ?? NaN);
@@ -32,9 +32,12 @@ describe('mail tools', () => {
 
   const call = async (name, args = {}) => textOf(await mcp.callTool({ name, arguments: args }));
 
-  test('lists mail folders with paths, without other folder types', async () => {
+  test('lists mail folders with paths, roles and the mailbox owner, without other folder types', async () => {
     const text = await call('mail_folders_list');
-    assert.match(text, /- Inbox\/Projects\n/);
+    assert.match(text, /Mailbox owner: jan@example\.com/);
+    assert.match(text, /- INBOX \[inbox\]\n/);
+    assert.match(text, /- Sent Items \[sent\]\n/);
+    assert.match(text, /- INBOX\/Projects\n/);
     assert.doesNotMatch(text, /Calendar/);
   });
 
@@ -120,10 +123,10 @@ describe('mail tools', () => {
       }
       offset = nextOffsetOf(text);
     }
-    assert.equal(collected, longBody);
+    assert.equal(collected, longBody.trimEnd());
 
     const whole = await call('mail_get', { id, maxChars: 100000 });
-    assert.match(whole, /Body: 84000 characters\. COMPLETE\./);
+    assert.match(whole, /Body: 83999 characters\. COMPLETE\./);
   });
 
   test('mail_get reads very old messages and converts HTML to text', async () => {
@@ -160,12 +163,72 @@ describe('mail tools', () => {
     assert.match(text, /Showing results 1-5 of 7000/);
   });
 
+  test('returns the complete body although Mails.getById only gives a preview', async () => {
+    const text = await call('mail_get', { id: mock.state.mails[3].id, maxChars: 100000 });
+    assert.ok(longBody.length > PREVIEW_CHARS);
+    assert.match(text, /Body: 83999 characters\. COMPLETE\./);
+    assert.doesNotMatch(text, /WARNING/);
+    assert.equal(mock.callsOf('Mails.getPageWithId').length, 1);
+  });
+
   test('marks read tools as read-only', async () => {
     const { tools } = await mcp.listTools();
-    assert.deepEqual(tools.map((tool) => tool.name), ['mail_folders_list', 'mail_search', 'mail_get']);
+    assert.deepEqual(tools.map((tool) => tool.name), ['mail_folders_list', 'mail_search', 'mail_get', 'mail_get_attachment']);
     for (const tool of tools) {
       assert.equal(tool.annotations.readOnlyHint, true);
       assert.equal(tool.annotations.destructiveHint, false);
     }
+  });
+});
+
+describe('incoming and outgoing messages', () => {
+  // Mirrors a real mailbox: sent mail is stored in Sent Items and also copied into INBOX,
+  // and INBOX receives copies of mail addressed only to colleagues.
+  const at = (minutes) => kerioDate(new Date(Date.UTC(2026, 9, 23, 10, 0, 0) - minutes * 60_000));
+  const owner = { name: 'Jan', address: 'jan@example.com' };
+  const client = { name: 'Client', address: 'client@customer.example' };
+  const colleague = { name: 'Colleague', address: 'colleague@example.com' };
+  const mails = [
+    { id: 'mail-in', folderId: INBOX, from: client, to: [owner], subject: 'Order', receiveDate: at(0) },
+    { id: 'mail-out-inbox-copy', folderId: INBOX, from: owner, to: [client], subject: 'RE: Order', receiveDate: at(10) },
+    { id: 'mail-out-sent', folderId: SENT, from: owner, to: [client], subject: 'RE: Order', receiveDate: at(10.05) },
+    { id: 'mail-colleague-copy', folderId: INBOX, from: client, to: [colleague], subject: 'Invoice', receiveDate: at(20) },
+  ].map((mail) => ({ cc: [], isSeen: true, displayableParts: [{ contentType: 'ctTextPlain', content: 'x' }], ...mail }));
+
+  let mock;
+  let mcp;
+  before(async () => {
+    mock = await startMockKerio({ mails });
+    mcp = await connectMcp(makeClient(mock));
+  });
+  after(() => mock.close());
+
+  const search = async (args = {}) => textOf(await mcp.callTool({ name: 'mail_search', arguments: args }));
+  const resultFor = (text, id) => text.split('\n\n').find((block) => block.includes(`ID: ${id}`)) ?? '';
+
+  test('labels every result with its direction and names the mailbox owner', async () => {
+    const text = await search();
+    assert.match(text, /Mailbox owner: jan@example\.com/);
+    assert.match(resultFor(text, 'mail-in'), /Direction: INCOMING\n/);
+    assert.match(resultFor(text, 'mail-out-inbox-copy'), /Direction: OUTGOING/);
+    assert.match(resultFor(text, 'mail-out-sent'), /Direction: OUTGOING/);
+    assert.match(resultFor(text, 'mail-colleague-copy'), /INCOMING \(owner not in To\/Cc/);
+  });
+
+  test('marks the second copy of a sent message', async () => {
+    const text = await search();
+    assert.match(resultFor(text, 'mail-out-sent'), /Note: copy of result \[2\]/);
+    assert.doesNotMatch(resultFor(text, 'mail-out-inbox-copy'), /copy of result/);
+  });
+
+  test('direction filter separates sent mail from received mail, regardless of folder', async () => {
+    assert.deepEqual(idsIn(await search({ direction: 'outgoing' })), ['mail-out-inbox-copy', 'mail-out-sent']);
+    assert.deepEqual(idsIn(await search({ direction: 'incoming' })), ['mail-in', 'mail-colleague-copy']);
+    assert.deepEqual(idsIn(await search({ direction: 'incoming', folder: 'INBOX' })), ['mail-in', 'mail-colleague-copy']);
+  });
+
+  test('mail_get shows the direction too', async () => {
+    const text = textOf(await mcp.callTool({ name: 'mail_get', arguments: { id: 'mail-out-inbox-copy' } }));
+    assert.match(text, /Direction: OUTGOING \(sent by the mailbox owner\)/);
   });
 });

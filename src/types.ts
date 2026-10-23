@@ -26,6 +26,8 @@ export interface KerioFolder {
   id: string;
   name: string;
   type: string;
+  /** FSubInbox, FSubSentItems, FSubDrafts, FSubDeletedItems, FSubJunkEmail, FSubNone, ... */
+  subType?: string;
   parentId?: string;
   [key: string]: unknown;
 }
@@ -37,8 +39,12 @@ export interface DisplayablePart {
 
 export interface KerioAttachment {
   id?: string;
+  /** Download path relative to the server root, e.g. /webmail/api/download/attachment/... */
+  url?: string;
   name?: string;
   contentType?: string;
+  /** Set for inline attachments referenced from the HTML body (cid:). */
+  contentId?: string;
   size?: number;
 }
 

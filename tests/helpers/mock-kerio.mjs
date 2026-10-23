@@ -10,15 +10,21 @@ import crypto from 'node:crypto';
 const fixture = (name) => readFileSync(new URL(`../fixtures/${name}`, import.meta.url), 'utf8');
 
 export const TEST_CA = fixture('ca.pem');
-export const READ_METHODS = ['Session.login', 'Folders.get', 'Mails.get', 'Mails.getById'];
+export const READ_METHODS = ['Session.login', 'Folders.get', 'Mails.get', 'Mails.getById', 'Mails.getPageWithId', 'GET attachment'];
+/** Like the real server, Mails.getById only returns the start of the text. */
+export const PREVIEW_CHARS = 90;
 
+export const INBOX = 'keriostorage://folder/example.com/jan/inbox';
+export const SENT = 'keriostorage://folder/example.com/jan/sent';
 export const FOLDERS = [
   { id: 'keriostorage://folder/example.com/jan/root', name: 'Mailbox', type: 'FRoot' },
-  { id: 'keriostorage://folder/example.com/jan/inbox', name: 'Inbox', type: 'FMail', parentId: 'keriostorage://folder/example.com/jan/root' },
-  { id: 'keriostorage://folder/example.com/jan/sent', name: 'Sent Items', type: 'FMail', parentId: 'keriostorage://folder/example.com/jan/root' },
-  { id: 'keriostorage://folder/example.com/jan/projects', name: 'Projects', type: 'FMail', parentId: 'keriostorage://folder/example.com/jan/inbox' },
+  { id: INBOX, name: 'INBOX', type: 'FMail', subType: 'FSubInbox', parentId: 'keriostorage://folder/example.com/jan/root' },
+  { id: SENT, name: 'Sent Items', type: 'FMail', subType: 'FSubSentItems', parentId: 'keriostorage://folder/example.com/jan/root' },
+  { id: 'keriostorage://folder/example.com/jan/projects', name: 'Projects', type: 'FMail', subType: 'FSubNone', parentId: INBOX },
   { id: 'keriostorage://folder/example.com/jan/calendar', name: 'Calendar', type: 'FCalendar' },
 ];
+
+export const attachmentFixture = (name) => readFileSync(new URL(`../fixtures/${name}`, import.meta.url));
 
 const pad = (n) => String(n).padStart(2, '0');
 /** Kerio-style UTC date: 20190304T102200+0000 */
@@ -50,9 +56,13 @@ export function makeMails(count, overrides = () => ({})) {
   }));
 }
 
-export async function startMockKerio({ mails = makeMails(10), username = 'jan@example.com', password = 'secret' } = {}) {
+/**
+ * @param files map of attachment download path → Buffer, served at that path for valid sessions
+ */
+export async function startMockKerio({ mails = makeMails(10), files = {}, username = 'jan@example.com', password = 'secret' } = {}) {
   const state = {
     mails,
+    files,
     calls: [],
     sessions: new Set(),
     logins: 0,
@@ -113,10 +123,23 @@ export async function startMockKerio({ mails = makeMails(10), username = 'jan@ex
         const errors = [];
         params.ids.forEach((mailId, inputIndex) => {
           const mail = state.mails.find((item) => item.id === mailId);
-          if (mail) result.push(structuredClone(mail));
-          else errors.push({ inputIndex, code: -32602, message: 'Item not found' });
+          if (!mail) return errors.push({ inputIndex, code: -32602, message: 'Item not found' });
+          const preview = structuredClone(mail);
+          preview.displayableParts = preview.displayableParts.map((part) => ({ ...part, content: part.content.slice(0, PREVIEW_CHARS) }));
+          result.push(preview);
         });
         return ok({ result, errors });
+      }
+
+      case 'Mails.getPageWithId': {
+        const inScope = state.mails.filter((mail) => params.folderIds.includes(mail.folderId));
+        const index = inScope.findIndex((mail) => mail.id === params.id);
+        if (index < 0) return ok({ list: [], start: 0, totalItems: inScope.length });
+        const start = Math.floor(index / params.query.limit) * params.query.limit;
+        const list = inScope.slice(start, start + params.query.limit).map((mail) =>
+          Object.fromEntries(params.query.fields.filter((field) => field in mail).map((field) => [field, mail[field]]))
+        );
+        return ok({ list, start, totalItems: inScope.length });
       }
 
       case 'Mails.create': {
@@ -143,7 +166,27 @@ export async function startMockKerio({ mails = makeMails(10), username = 'jan@ex
     }
   };
 
+  const serveAttachment = (req, res) => {
+    state.calls.push({ method: 'GET attachment', params: { path: req.url } });
+    const cookie = req.headers.cookie ?? '';
+    if (![...state.sessions].some((token) => cookie.includes(`SESSION_CONNECT_WEBMAIL=cookie-${token}`))) {
+      res.writeHead(401).end();
+      return;
+    }
+    const data = state.files[decodeURI(req.url)];
+    if (!data) {
+      res.writeHead(404).end();
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': data.length });
+    res.end(data);
+  };
+
   const server = https.createServer({ key: fixture('server-key.pem'), cert: fixture('server.pem') }, (req, res) => {
+    if (req.method === 'GET' && req.url.startsWith('/webmail/api/download/attachment/')) {
+      serveAttachment(req, res);
+      return;
+    }
     if (req.method !== 'POST' || req.url !== '/webmail/api/jsonrpc') {
       res.writeHead(404).end();
       return;

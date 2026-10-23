@@ -139,7 +139,7 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
 
     const client = await mcpClient(app, tokens.access_token);
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((tool) => tool.name), ['mail_folders_list', 'mail_search', 'mail_get']);
+    assert.deepEqual(tools.map((tool) => tool.name), ['mail_folders_list', 'mail_search', 'mail_get', 'mail_get_attachment']);
     const result = await client.callTool({ name: 'mail_search', arguments: { limit: 3 } });
     assert.match(textOf(result), /Showing results 1-3 of 10/);
     await client.close();
@@ -167,7 +167,7 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
     assert.equal(refreshed.status, 200);
     const next = await refreshed.json();
     const client = await mcpClient(app, next.access_token);
-    assert.equal((await client.listTools()).tools.length, 3);
+    assert.equal((await client.listTools()).tools.length, 4);
     await client.close();
   });
 

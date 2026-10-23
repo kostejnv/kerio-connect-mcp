@@ -6,7 +6,15 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { KerioClient } from './client.js';
-import { getMailToolDefinitions, mailFoldersList, mailGet, mailSearch, mailSend, type ToolResult } from './mail-tools.js';
+import {
+  getMailToolDefinitions,
+  mailFoldersList,
+  mailGet,
+  mailGetAttachment,
+  mailSearch,
+  mailSend,
+  type ToolResult,
+} from './mail-tools.js';
 import { normalizeToolArguments } from './tool-arguments.js';
 import { PACKAGE_VERSION } from './version.js';
 
@@ -18,6 +26,8 @@ async function callTool(client: KerioClient, name: string, args: Record<string, 
       return mailSearch(client, args);
     case 'mail_get':
       return mailGet(client, args);
+    case 'mail_get_attachment':
+      return mailGetAttachment(client, args);
     case 'mail_send':
       // Not listed when sending is disabled; a direct call is refused before any request to Kerio.
       if (!client.sendEnabled) {
@@ -44,7 +54,8 @@ export function createMcpServer(client: KerioClient): Server {
 
     try {
       const result = await callTool(client, request.params.name, args);
-      return { content: [{ type: 'text', text: result.text }], isError: result.isError ?? false };
+      const images = (result.images ?? []).map((image) => ({ type: 'image' as const, ...image }));
+      return { content: [{ type: 'text' as const, text: result.text }, ...images], isError: result.isError ?? false };
     } catch (error) {
       const message = error instanceof z.ZodError
         ? `Invalid arguments:\n${z.prettifyError(error)}`
