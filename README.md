@@ -3,8 +3,8 @@
 An [MCP](https://modelcontextprotocol.io) server that connects AI assistants (Claude, ChatGPT, Claude Code, …) to a
 **Kerio Connect** mailbox.
 
-- **Read-only by default:** list folders, search the whole history, read complete messages. Reading never marks
-  messages as read or changes them.
+- **Read-only by default:** list folders, search the whole history, read complete messages, read attachments and get
+  download links for them. Reading never marks messages as read or changes them.
 - **Sending is opt-in:** off unless the server operator enables it and the user opts in per connection.
 - **Remote or local:** a hosted endpoint with OAuth sign-in (users enter their own Kerio server, username and password;
   nothing is stored on the server), or a local stdio process for one mailbox.
@@ -17,12 +17,15 @@ reworked for reliable reading and remote use.
 
 | Tool | Purpose |
 |---|---|
-| `mail_folders_list` | List mail folders with IDs and paths |
-| `mail_search` | Search all folders or one folder: full-text `query`, `from`, `to`, `subject`, `dateFrom`, `dateTo`, `unreadOnly`; exact totals and `nextOffset` paging; always states whether the search is complete |
-| `mail_get` | Read one message by ID (any age), full text in parts with `COMPLETE` / `PARTIAL` status |
+| `mail_folders_list` | List mail folders with IDs, paths and roles (inbox, sent, drafts, deleted, junk) |
+| `mail_search` | Search all folders or one folder: full-text `query`, `direction`, `from`, `to`, `subject`, `dateFrom`, `dateTo`, `unreadOnly`; every result is marked INCOMING / OUTGOING / DRAFT; exact totals and `nextOffset` paging; always states whether the search is complete |
+| `mail_get` | Read one message by ID (any age), full text in parts with `COMPLETE` / `PARTIAL` status, numbered attachments |
+| `mail_get_attachment` | Read an attachment: text from PDF, DOCX, XLSX/XLS/ODS, CSV, text, HTML, ICS, EML; images as images |
+| `mail_attachment_link` | Download links for attachments in their original format, one per file plus one ZIP (remote mode, 10 minutes) |
 | `mail_send` | Send a plain-text message (To, Cc, Bcc) — only on connections with sending enabled |
 
-Details and response formats: [docs/tools.md](docs/tools.md).
+Details and response formats: [docs/tools.md](docs/tools.md). Opening the server address in a browser shows a landing
+page with the same information for people.
 
 ## Connecting a client
 

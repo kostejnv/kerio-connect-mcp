@@ -1,40 +1,50 @@
 # Verification status
 
-## Verified
+## Verified against the simulated Kerio API
 
-Against the **simulated Kerio API** (`npm test`), built from the official
-[client API reference](https://manuals.gfi.com/en/kerio/api/connect/client/reference/index.html):
+`npm test` runs against an HTTPS mock built from the official
+[client API reference](https://manuals.gfi.com/en/kerio/api/connect/client/reference/index.html) and from what the real
+server returned (below):
 
-- reading a message far beyond the newest 500 by ID;
-- complete long bodies, in parts with explicit continuation;
-- complete filtered searches and exact paging;
+- reading a message far beyond the newest 500 by ID, complete long bodies in parts, the HTML-plus-preview body shape;
+- complete filtered searches, exact paging, direction labels and copies of sent mail;
+- attachments: PDF, DOCX, XLSX, text and images; size limits; only the server's download path; long text in parts;
+- download links: original bytes, ZIP contents, headers, tampered and foreign tickets refused;
 - read operations use only read methods and leave seen state unchanged;
 - disabled sending: not listed, direct call refused, client refuses, no requests, no drafts;
 - enabled sending, partial success, reported failure, timeout and dropped connection without retries;
 - certificate verification, custom CA, private address blocking, session renewal;
-- the OAuth flow with PKCE, token refresh, send opt-in and master switch.
+- the OAuth flow with PKCE, token refresh, send opt-in and master switch; the landing page.
 
-On the **deployed server**: valid HTTPS, OAuth metadata, dynamic client registration and the sign-in page.
+## Verified against a real server
 
-Against **Kerio Connect 10.0.8 patch 2** (`mail.sapmimon.cz`, without signing in): TLS with the server's self-signed
-certificate trusted through `KERIO_CA_FILE` (and rejected without it), and a JSON-RPC request without a session answers
-`{"code": -32001, "message": "Session expired."}`, the code the client treats as an expired session (assumption 5).
+**Kerio Connect 10.0.8 patch 2** (a production installation with a self-signed certificate trusted through
+`KERIO_CA_FILE`), through the deployed server and Claude Code, October 2026:
 
-## Not yet verified against a real Kerio server
+| Behaviour | Result |
+|---|---|
+| TLS | accepted with `KERIO_CA_FILE`, rejected without it |
+| Missing session | `{"code": -32001, "message": "Session expired."}` |
+| Folders | `Folders.get` lists INBOX, Sent Items, Drafts, Deleted Items, Junk E-mail and own folders |
+| Search | `Mails.get` over all folders (over 100,000 messages) returns `totalItems` and sorts newest first; `QUICKSEARCH` works; date filters with early stop work |
+| `receiveDate` | parsed correctly |
+| Reading | `Mails.getById` returns the full text as an HTML part plus a ~90 character plain-text preview; an unread message stays unread after `mail_get` |
+| `Mails.getPageWithId` | returns no text parts (not used) |
+| Direction | sent mail is stored in Sent Items **and** copied into INBOX; INBOX also holds copies of mail addressed to colleagues |
+| Attachments | `mail_get_attachment` downloads through the attachment URL with the session cookies and extracts a 3-page PDF |
+| Spam | Kerio's antispam moves spam to Junk E-mail and prefixes `**SPAM**`; such prefixes also survive in subjects of ordinary replies |
 
-These behaviours are not specified in Kerio's documentation and are assumptions:
+## Not yet verified
 
-| # | Assumption | Affects | If wrong |
+| # | Behaviour | Affects | If wrong |
 |---|---|---|---|
-| 1 | `Mails.getById` returns `displayableParts` and does not mark the message as seen | `mail_get` | Empty bodies, or reading marks messages as read |
-| 2 | `receiveDate` looks like `20240115T093000+0100` (or ISO 8601) | date filters, date display | Date filters match nothing |
-| 3 | `Mails.get` over several folders sorts by `receiveDate` descending and returns `totalItems` | search order, totals, early stop with `dateFrom` | Wrong order or totals (the early stop switches itself off if results are not newest first) |
-| 4 | `QUICKSEARCH` with `Like` performs the full-text search | `query` | `query` finds nothing or errors |
-| 5 | An expired session is reported with codes -32001 to -32003 or HTTP 401 (confirmed for a missing session: -32001) | session renewal | Errors after idle time instead of a silent re-login |
-| 6 | Partial success of `Mails.create` mentions "partial" in the error code or message | `SENT WITH WARNINGS` | Reported as `NOT SENT` although it was sent |
-| 7 | Kerio accepts `from` = the username when it is an e-mail address, and fills in the sender otherwise | `mail_send` | Sending fails or uses an unexpected sender |
+| 1 | An expired session (after idle time) is reported like a missing one | session renewal | Errors after idle time instead of a silent re-login |
+| 2 | Partial success of `Mails.create` mentions "partial" in the error code or message | `SENT WITH WARNINGS` | Reported as `NOT SENT` although it was sent |
+| 3 | Kerio accepts `from` = the username when it is an e-mail address, and fills in the sender otherwise | `mail_send` | Sending fails or uses an unexpected sender |
+| 4 | `mail_attachment_link` links open from Claude Code (`curl`) and from a browser | downloads | Links fail although reading attachments works |
+| 5 | In a ChatGPT workspace, each member signs in with their own account | per-user access | Members would share the admin's connection |
 
-## Checklist for a real server
+## Checklist
 
 Use a regular (non-administrator) account.
 
@@ -42,15 +52,10 @@ Use a regular (non-administrator) account.
    ```bash
    KERIO_INTEGRATION=1 KERIO_SERVER=mail.example.com KERIO_USERNAME=... KERIO_PASSWORD=... npm run test:integration
    ```
-   It reads the oldest Inbox message, checks seen state, flags and folder did not change (assumption 1), and prints the
-   date format (assumption 2).
-2. **Connect a client** and ask it to:
-   - list folders;
-   - find an old message by sender and year (assumptions 2–4);
-   - read a long message to the end;
-   - search again after more than the Kerio session timeout (assumption 5).
-3. **In webmail**, confirm an unread message the agent read is still unread.
-4. **Sending** (only when needed): enable it, connect with the checkbox ticked, send one message to your own address,
-   and check the Sent folder (assumptions 6–7).
+2. **Downloads** (4): ask the assistant for the attachments of a message with several files; open one link and the ZIP.
+3. **Idle session** (1): search again after more than the Kerio session timeout.
+4. **ChatGPT workspace** (5): a colleague connects; their results must show `Mailbox owner: <their address>`.
+5. **Sending** (2, 3, only when needed): enable it, connect with the checkbox ticked, send one message to your own
+   address, and check the Sent folder.
 
 Record the results here, including the Kerio Connect version tested.

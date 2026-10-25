@@ -40,6 +40,9 @@ Reload Caddy (for a Caddy container: `docker exec caddy caddy reload --config /e
 ## Checking the deployment
 
 ```bash
+curl -I https://kerio.example.com/
+# 200: the landing page (what the server does, how to connect, the tools)
+
 curl https://kerio.example.com/healthz
 # {"status":"ok"}
 

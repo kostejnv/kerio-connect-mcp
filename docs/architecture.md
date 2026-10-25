@@ -44,8 +44,13 @@ The server has two transports:
 | `src/oauth-provider.ts` | Stateless OAuth provider: client registration, codes, access and refresh tokens |
 | `src/sealed-token.ts` | AES-256-GCM sealing of all OAuth artifacts |
 | `src/login-page.ts` | Sign-in page (English with a CSS-only Czech switch) and error page |
+| `src/attachment-text.ts` | Attachment format detection and conversion to text; runs the worker with limits |
+| `src/attachment-worker.ts` | Worker thread: PDF (`unpdf`), DOCX (`mammoth`), spreadsheets (SheetJS) to text |
+| `src/html-to-text.ts` | HTML to plain text for message bodies and HTML attachments |
+| `src/zip.ts` | Minimal ZIP writer for downloading several attachments at once |
 | `src/tool-arguments.ts` | Tolerant conversion of stringified tool arguments |
 | `src/types.ts` | Types of the Kerio API structures used |
+| `public/` | Landing page (`index.html`, `landing.js`) and the identity assets it uses |
 
 ## Request flow
 
@@ -99,6 +104,7 @@ Nothing is persisted:
 | Access token | MCP client | 1 hour |
 | Refresh token | MCP client; a new one is issued on every refresh | 90 days from last refresh |
 | Kerio client and session | server memory | evicted after 30 minutes idle |
+| Download link ticket | the download URL (sealed) | 10 minutes |
 
 Each sealed artifact type uses its own associated data, so a refresh token is never accepted as an access token and so on.
 Losing server memory (restart, deploy) only costs one extra Kerio sign-in on the next request.
@@ -110,7 +116,8 @@ Losing server memory (restart, deploy) only costs one extra Kerio sign-in on the
 | `Session.login` | Signing in; returns the `X-Token`, the `SESSION_CONNECT_WEBMAIL` cookie is taken from `Set-Cookie` |
 | `Folders.get` | Listing mail folders (type `FMail`) |
 | `Mails.get` | Search pages: `folderIds`, `start`, `limit`, order by `receiveDate` descending, optional `QUICKSEARCH` condition; returns `totalItems` |
-| `Mails.getById` | Reading one message with its displayable parts |
+| `Mails.getById` | Reading one message: displayable parts (HTML plus a short plain preview) and attachments with their download URLs |
+| `GET <attachment url>` | Downloading an attachment (`/webmail/api/download/attachment/…`, session cookies and `X-Token`) |
 | `Mails.create` | Sending (only with sending enabled; one message with `send: true`) |
 
 Reference: [Kerio Connect client API](https://manuals.gfi.com/en/kerio/api/connect/client/reference/index.html).

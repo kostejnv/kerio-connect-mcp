@@ -3,6 +3,32 @@
 All notable changes to this project are documented in this file. The project
 follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-10-25
+
+### Added
+
+- `mail_get_attachment`: text from PDF, DOCX, XLSX/XLS/ODS, CSV, text, HTML,
+  ICS and EML attachments, images as image content; parsed in a worker thread
+  with memory and time limits.
+- `mail_attachment_link` (remote mode): short-lived sealed download links per
+  attachment and one ZIP for several; inline signature images skipped.
+- Direction of every message (INCOMING / OUTGOING / DRAFT), mailbox owner,
+  folder roles from Kerio's subtype, copies of sent mail marked, and a
+  `direction` filter for `mail_search`.
+- Landing page at the server address (English with a Czech switch).
+- `certs/` directory mounted into the container for `KERIO_CA_FILE`.
+
+### Fixed
+
+- Message bodies were cut off after ~90 characters: Kerio returns the full
+  text as HTML plus a short plain-text preview, and the preview was preferred.
+- `KERIO_ALLOW_SEND=false` now also withdraws sending from connections that
+  opted in earlier.
+
+### Changed
+
+- Requires Node.js 22.
+
 ## [0.3.0] - 2026-10-23
 
 Fork focused on reliable mail reading. Breaking: all non-mail and mail-changing

@@ -2,7 +2,12 @@
 
 ## Setup
 
-Requires Node.js 20 or newer.
+Requires Node.js 22 or newer (the PDF library needs it). Without a local Node 22, run the tests in the same image as
+production:
+
+```bash
+docker run --rm -v "$PWD":/app -w /app node:22-alpine sh -c "npm ci && npm test"
+```
 
 ```bash
 npm install
@@ -58,6 +63,11 @@ used and that nothing changed.
 | `tests/oauth-http.test.mjs` | Whole OAuth flow with PKCE, sign-in form, token refresh, send opt-in and master switch, remote `/mcp` |
 | `tests/config.test.mjs` | Strict switches, token key validation, sealed token integrity |
 | `tests/tool-arguments.test.mjs` | Conversion of stringified tool arguments |
+| `tests/attachments.test.mjs` | Attachment text from PDF, DOCX, XLSX, text; images; size and URL limits |
+| `tests/download-links.test.mjs` | Download links and ZIP: original bytes, headers, inline images, tampered tickets |
+
+Attachment fixtures (`tests/fixtures/sample.*`) are tiny generated files: a two-page PDF, a DOCX, a two-sheet XLSX and a
+1×1 PNG.
 | `tests/integration/readonly.test.mjs` | Optional, read-only, real server; skipped unless `KERIO_INTEGRATION=1` |
 
 No test sends real e-mail. The integration test creates its client with sending disabled.
