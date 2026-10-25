@@ -8,17 +8,24 @@ import { z } from 'zod';
 import type { KerioClient } from './client.js';
 import {
   getMailToolDefinitions,
+  mailAttachmentLink,
   mailFoldersList,
   mailGet,
   mailGetAttachment,
   mailSearch,
   mailSend,
+  type DownloadLinkIssuer,
   type ToolResult,
 } from './mail-tools.js';
 import { normalizeToolArguments } from './tool-arguments.js';
 import { PACKAGE_VERSION } from './version.js';
 
-async function callTool(client: KerioClient, name: string, args: Record<string, unknown>): Promise<ToolResult> {
+export interface McpServerOptions {
+  /** Remote mode only: issues download links for mail_attachment_link. */
+  issueDownloadLink?: DownloadLinkIssuer;
+}
+
+async function callTool(client: KerioClient, name: string, args: Record<string, unknown>, options: McpServerOptions): Promise<ToolResult> {
   switch (name) {
     case 'mail_folders_list':
       return mailFoldersList(client);
@@ -28,6 +35,9 @@ async function callTool(client: KerioClient, name: string, args: Record<string, 
       return mailGet(client, args);
     case 'mail_get_attachment':
       return mailGetAttachment(client, args);
+    case 'mail_attachment_link':
+      if (!options.issueDownloadLink) return { text: `ERROR: Unknown tool: ${name}`, isError: true };
+      return mailAttachmentLink(client, args, options.issueDownloadLink);
     case 'mail_send':
       // Not listed when sending is disabled; a direct call is refused before any request to Kerio.
       if (!client.sendEnabled) {
@@ -39,8 +49,8 @@ async function callTool(client: KerioClient, name: string, args: Record<string, 
   }
 }
 
-export function createMcpServer(client: KerioClient): Server {
-  const toolDefinitions = getMailToolDefinitions(client.sendEnabled);
+export function createMcpServer(client: KerioClient, options: McpServerOptions = {}): Server {
+  const toolDefinitions = getMailToolDefinitions(client.sendEnabled, { downloadLinks: Boolean(options.issueDownloadLink) });
   const server = new Server(
     { name: 'kerio-connect-mcp', version: PACKAGE_VERSION },
     { capabilities: { tools: {} } }
@@ -53,9 +63,10 @@ export function createMcpServer(client: KerioClient): Server {
     const args = normalizeToolArguments(request.params.arguments ?? {}, definition?.inputSchema);
 
     try {
-      const result = await callTool(client, request.params.name, args);
+      const result = await callTool(client, request.params.name, args, options);
       const images = (result.images ?? []).map((image) => ({ type: 'image' as const, ...image }));
-      return { content: [{ type: 'text' as const, text: result.text }, ...images], isError: result.isError ?? false };
+      const links = (result.links ?? []).map((link) => ({ type: 'resource_link' as const, ...link }));
+      return { content: [{ type: 'text' as const, text: result.text }, ...images, ...links], isError: result.isError ?? false };
     } catch (error) {
       const message = error instanceof z.ZodError
         ? `Invalid arguments:\n${z.prettifyError(error)}`

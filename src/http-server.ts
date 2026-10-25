@@ -4,10 +4,14 @@
  *   /mcp                      MCP endpoint (Bearer token)
  *   /authorize, /token, ...   OAuth endpoints provided by the MCP SDK
  *   /login                    sign-in form submission
+ *   /download/:ticket/:name   attachment download by a short-lived sealed link
  *   /healthz                  liveness check
+ *   /, /assets/*              landing page describing the server
  */
 
 import crypto from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import express, { type Request, type Response } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import type { Dispatcher } from 'undici';
@@ -16,13 +20,21 @@ import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middlew
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { KerioClient, KerioLoginError, KerioTransportError } from './client.js';
 import type { HttpConfig } from './config.js';
+import { MAX_ATTACHMENT_BYTES } from './attachment-text.js';
 import { sendErrorPage, sendLoginPage, type LocalizedText } from './login-page.js';
+import { DOWNLOAD_LINK_MINUTES, MAX_ZIP_BYTES, type DownloadLinkIssuer } from './mail-tools.js';
 import { createMcpServer } from './mcp-server.js';
 import { normalizeServerUrl, ServerNotAllowedError } from './network.js';
 import { StatelessOAuthProvider, type Grant } from './oauth-provider.js';
 import { TokenSealer } from './sealed-token.js';
+import { createZip, uniqueNames } from './zip.js';
 
 const IDLE_CLIENT_TTL_MS = 30 * 60 * 1000;
+const PUBLIC_DIR = new URL('../public/', import.meta.url);
+
+function escapeHtml(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
 
 /**
  * Kerio clients (and their sessions) kept in memory between requests of the same connection.
@@ -104,6 +116,22 @@ export function createHttpApp(config: HttpConfig, dispatcher: Dispatcher) {
     res.json({ status: 'ok' });
   });
 
+  // Landing page for people who open the server address in a browser.
+  const landingPage = readFileSync(new URL('index.html', PUBLIC_DIR), 'utf8')
+    .replaceAll('%MCP_URL%', escapeHtml(mcpUrl.href))
+    .replaceAll('%HOST%', escapeHtml(config.publicUrl.host));
+  app.get('/', (_req, res) => {
+    res.set({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-cache',
+      'X-Frame-Options': 'DENY',
+      'Content-Security-Policy':
+        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+        "font-src https://fonts.gstatic.com; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    }).send(landingPage);
+  });
+  app.use('/assets', express.static(fileURLToPath(PUBLIC_DIR), { index: false, maxAge: '1h' }));
+
   app.use(
     mcpAuthRouter({
       provider,
@@ -160,7 +188,12 @@ export function createHttpApp(config: HttpConfig, dispatcher: Dispatcher) {
 
   app.post('/mcp', bearerAuth, express.json({ limit: '1mb' }), async (req: Request, res: Response) => {
     const grant = req.auth?.extra?.grant as Grant;
-    const server = createMcpServer(pool.get(grant));
+    const issueDownloadLink: DownloadLinkIssuer = ({ mailId, attachments, zip, fileName }) => {
+      const ticket: DownloadTicket = { credentials: grant.credentials, mailId, attachments, zip, fileName };
+      const sealed = sealer.seal('download', ticket, DOWNLOAD_LINK_MINUTES * 60);
+      return new URL(`/download/${sealed}/${encodeURIComponent(fileName)}`, config.publicUrl).href;
+    };
+    const server = createMcpServer(pool.get(grant), { issueDownloadLink });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     res.on('close', () => {
       void transport.close();
@@ -183,5 +216,86 @@ export function createHttpApp(config: HttpConfig, dispatcher: Dispatcher) {
     res.status(405).set('Allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
   });
 
+  // The ticket is the authorization: sealed, short-lived, for the attachments of one mail only.
+  app.get(
+    '/download/:ticket/:name',
+    rateLimit({ windowMs: 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false }),
+    async (req: Request, res: Response) => {
+      res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' });
+      const ticket = sealer.open<DownloadTicket>('download', String(req.params.ticket))?.data;
+      if (!ticket) {
+        res.status(404).type('text/plain').send('This download link has expired or is invalid. Ask the assistant for a new link.');
+        return;
+      }
+
+      try {
+        const file = await downloadTicketFile(pool.get({ credentials: ticket.credentials, sendEnabled: false }), ticket);
+        res.set({
+          'Content-Type': file.contentType,
+          'Content-Disposition': contentDisposition(file.name),
+          'Content-Length': String(file.data.length),
+          'Content-Security-Policy': "sandbox; default-src 'none'",
+        });
+        res.send(file.data);
+      } catch (error) {
+        console.error(`[Download] Failed: ${error instanceof Error ? error.name : 'Error'}`);
+        const status = error instanceof KerioLoginError ? 403 : error instanceof DownloadNotFoundError ? 404 : 502;
+        res.status(status).type('text/plain').send(
+          error instanceof KerioLoginError
+            ? 'Signing in to Kerio failed (was the password changed?). Connect the assistant again.'
+            : error instanceof DownloadNotFoundError
+              ? error.message
+              : 'The attachment could not be downloaded from Kerio. Try again later.'
+        );
+      }
+    }
+  );
+
   return app;
+}
+
+interface DownloadTicket {
+  credentials: Grant['credentials'];
+  mailId: string;
+  /** 1-based attachment numbers as listed by mail_get. */
+  attachments: number[];
+  zip: boolean;
+  fileName: string;
+}
+
+class DownloadNotFoundError extends Error {}
+
+/** Fetches the ticket's attachment(s) from Kerio now: one file as it is, or several bundled into a ZIP. */
+async function downloadTicketFile(client: KerioClient, ticket: DownloadTicket) {
+  const { result } = await client.getMailsById([ticket.mailId]);
+  const mail = result.find((item) => item.id === ticket.mailId);
+  const attachments = ticket.attachments.map((number) => mail?.attachments?.[number - 1]);
+  if (!mail || attachments.some((attachment) => !attachment?.url)) {
+    throw new DownloadNotFoundError('The e-mail or attachment no longer exists.');
+  }
+
+  const files = [];
+  let total = 0;
+  for (const attachment of attachments) {
+    const data = await client.downloadAttachment(attachment!.url!, MAX_ATTACHMENT_BYTES);
+    total += data.length;
+    if (total > MAX_ZIP_BYTES) throw new DownloadNotFoundError('The attachments are too large to download together.');
+    files.push({ name: attachment!.name || 'attachment', contentType: attachment!.contentType, data });
+  }
+
+  if (ticket.zip) {
+    const names = uniqueNames(files.map((file) => file.name));
+    return { name: ticket.fileName, contentType: 'application/zip', data: createZip(files.map((file, i) => ({ name: names[i], data: file.data }))) };
+  }
+  const [file] = files;
+  const contentType = /^[\w.+-]+\/[\w.+-]+$/.test(file.contentType?.split(';')[0].trim() ?? '')
+    ? file.contentType!.split(';')[0].trim()
+    : 'application/octet-stream';
+  return { name: ticket.fileName, contentType, data: file.data };
+}
+
+/** attachment; filename="ascii fallback"; filename*=UTF-8''exact name */
+function contentDisposition(name: string): string {
+  const ascii = name.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^\w.\- ()]+/g, '_');
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
 }

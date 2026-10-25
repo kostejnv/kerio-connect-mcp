@@ -1,0 +1,65 @@
+/* Direction B · shared system styles (rev 9). Paper, ink, pencil, marker, washes, name. */
+.b, .page {
+  --paper: #fbfaf7; --ink: #1c1b19; --pencil: #66625c; --hair: #d9d5cc; --line: 217, 122, 52;
+  --marker: #f9db59; --grey: #454340; --s1: #1f6fd0; --s2: #e24a7b; --s3: #177a3e; --s4: #8a5cf0;
+  position: relative; z-index: 0;
+  background-color: var(--paper);
+  background-image:
+    linear-gradient(to right, rgba(var(--line), .18) 1px, transparent 1px), linear-gradient(to bottom, rgba(var(--line), .18) 1px, transparent 1px),
+    linear-gradient(to right, rgba(var(--line), .08) 1px, transparent 1px), linear-gradient(to bottom, rgba(var(--line), .08) 1px, transparent 1px),
+    linear-gradient(to right, rgba(var(--line), .035) 1px, transparent 1px), linear-gradient(to bottom, rgba(var(--line), .035) 1px, transparent 1px);
+  background-size: 40px 40px, 40px 40px, 20px 20px, 20px 20px, 4px 4px, 4px 4px;
+  color: var(--ink); font-family: "Literata", serif; font-size: 16px; line-height: 24px;
+}
+.h, .b h2, .b h3, .page h2, .page h3 { font-family: "Commissioner", sans-serif; font-weight: 700; }
+.b h2, .page h2 { margin: 0 0 12px; font-size: 26px; line-height: 40px; letter-spacing: -0.015em; display: flex; align-items: center; gap: 14px; }
+.b h2 .no, .page h2 .no { width: 40px; height: 40px; border: 1.5px solid var(--ink); background: var(--paper); font-family: "Azeret Mono", monospace; font-weight: 500; font-size: 13px; color: var(--ink); text-align: center; line-height: 37px; }
+.b h3, .page h3 { margin: 0 0 6px; font-size: 17px; line-height: 24px; }
+.b p, .page p { margin: 0 0 12px; }
+.cap { font-family: "Commissioner", sans-serif; font-weight: 500; font-size: 13px; line-height: 19px; color: var(--pencil); }
+.stamp { font-family: "Azeret Mono", monospace; font-size: 10.5px; line-height: 16px; color: var(--pencil); letter-spacing: -0.01em; }
+/* addresses and handles are codes that get copied character by character: stamp type, upright, ink (never italic: v reads as u) */
+.addr { font-family: "Azeret Mono", monospace; font-weight: 400; font-size: .87em; letter-spacing: -0.01em; }
+.lbl { font-family: "Commissioner", sans-serif; font-weight: 600; font-size: 13px; }
+svg { display: block; overflow: visible; }
+a { color: var(--ink); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+
+/* name: Commissioner 800 slanted; V and K in ink, the rest a little grey; two marker strokes under the K as the lowest layer */
+.name { font-family: "Commissioner", sans-serif; font-weight: 800; font-variation-settings: "slnt" -12; letter-spacing: -0.02em; line-height: 1; white-space: nowrap; color: var(--grey); position: relative; z-index: 0; }
+.name b { color: var(--ink); font-weight: inherit; }
+.name .k { position: relative; display: inline-block; color: var(--ink); }
+.name .k > i { position: absolute; z-index: -1; inset: 0.06em -0.2em -0.04em -0.22em; }
+.name .k > i::before, .name .k > i::after { content: ""; position: absolute; background: var(--marker); mix-blend-mode: multiply; opacity: .8; }
+.name .k > i::before { left: 0; right: 0.16em; top: 0; bottom: 0.26em; transform: rotate(-2.4deg); clip-path: polygon(12% 0, 100% 0, 86% 100%, 0 100%); }
+.name .k > i::after { left: 0.14em; right: 0; top: 0.18em; bottom: 0; transform: rotate(1.8deg); clip-path: polygon(5% 0, 100% 0, 95% 100%, 0 100%); }
+
+/* marker: every highlight is drawn by system.js (markerPath) from the font size of the text it marks.
+   <span class="mk" data-mk="single|double|under">…</span>; .nm = the K in the name (nameMark). */
+.mk { position: relative; z-index: 0; white-space: nowrap; }
+.nm { position: relative; display: inline-block; color: var(--ink); }
+/* dark variant of the name (for dark slides, avatars): light letters a step below paper so the yellow K stays the brightest thing; the K is ink on an opaque marker */
+.name.dark { color: #b8b4ab; }
+.name.dark b { color: #e2ded5; }
+.name.dark .nm { color: var(--ink); }
+
+/* grouping levels */
+.box { border: 1.5px solid var(--ink); background: var(--paper); }
+.wash { position: relative; z-index: 0; }
+.wash::before { content: ""; position: absolute; z-index: -1; inset: -4px -6px -6px -6px; background: var(--s1); opacity: .13; mix-blend-mode: multiply; transform: rotate(-0.25deg); }
+.wash.s3::before { background: var(--s3); opacity: .13; }
+.rule { border-top: 1.5px solid var(--ink); padding-top: 8px; }
+.tile { padding: 10px 14px 10px; }
+.tile .v { font-family: "Commissioner", sans-serif; font-weight: 700; font-size: 36px; line-height: 40px; letter-spacing: -0.02em; }
+.tile .v small { font-size: 16px; color: var(--pencil); font-weight: 600; margin-left: 4px; }
+.tile .l { font-family: "Commissioner", sans-serif; font-weight: 600; font-size: 12.5px; color: var(--pencil); line-height: 18px; }
+
+/* drawn objects */
+.tb { border-collapse: collapse; background: var(--paper); font-family: "Azeret Mono", monospace; font-size: 11px; line-height: 14px; }
+.tb td { border: 1.5px solid var(--ink); height: 40px; padding: 0 12px 6px; vertical-align: bottom; }
+.tb td small { display: block; font-size: 8.5px; line-height: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--pencil); margin-bottom: 3px; }
+table.cells { border-collapse: collapse; background: var(--paper); font-size: 15px; line-height: 20px; width: 100%; }
+table.cells td, table.cells th { border: 1.5px solid var(--ink); height: 40px; padding: 0 12px; text-align: left; font-weight: 400; }
+table.cells th { font-family: "Commissioner", sans-serif; font-weight: 600; font-size: 12.5px; color: var(--pencil); height: 30px; }
+/* figures in table columns: Literata 700 with tabular lining figures (Commissioner has none), so the digits line up */
+table.cells td.n { font-family: "Literata", serif; font-weight: 700; font-variant-numeric: tabular-nums lining-nums; text-align: right; }
+table.cells tr.thick td { border-bottom-width: 3px; }

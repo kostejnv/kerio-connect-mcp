@@ -1,85 +1,10 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import http from 'node:http';
 import { after, before, describe, test } from 'node:test';
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { createHttpApp } from '../dist/http-server.js';
-import { createKerioDispatcher } from '../dist/network.js';
-import { testNetwork, textOf } from './helpers/clients.mjs';
+import { textOf } from './helpers/clients.mjs';
+import { REDIRECT_URI, form, mcpClient, signIn, startApp } from './helpers/http.mjs';
 import { startMockKerio } from './helpers/mock-kerio.mjs';
-
-const REDIRECT_URI = 'https://claude.ai/api/mcp/auth_callback';
-
-async function startApp({ allowSend = false, network: networkOverrides = {}, tokenKey = crypto.randomBytes(32) } = {}) {
-  const server = http.createServer();
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const baseUrl = `http://localhost:${server.address().port}`;
-  const network = testNetwork(networkOverrides);
-  const app = createHttpApp(
-    { transport: 'http', network, publicUrl: new URL(baseUrl), port: 0, tokenKey, allowSend },
-    createKerioDispatcher(network)
-  );
-  server.on('request', app);
-  return { baseUrl, close: () => new Promise((resolve) => { server.closeAllConnections(); server.close(resolve); }) };
-}
-
-const form = (fields) => new URLSearchParams(fields).toString();
-
-/** Walks through dynamic client registration, the sign-in form and the PKCE code exchange. */
-async function signIn(app, mock, { password = mock.password, allowSend = false } = {}) {
-  const registration = await fetch(`${app.baseUrl}/register`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_name: 'Claude',
-      redirect_uris: [REDIRECT_URI],
-      token_endpoint_auth_method: 'none',
-      grant_types: ['authorization_code', 'refresh_token'],
-      response_types: ['code'],
-    }),
-  });
-  assert.equal(registration.status, 201);
-  const { client_id: clientId } = await registration.json();
-
-  const verifier = crypto.randomBytes(32).toString('base64url');
-  const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
-  const authorizeUrl = new URL(`${app.baseUrl}/authorize`);
-  authorizeUrl.search = new URLSearchParams({
-    response_type: 'code', client_id: clientId, redirect_uri: REDIRECT_URI,
-    code_challenge: challenge, code_challenge_method: 'S256', state: 'state-123',
-  }).toString();
-  const page = await (await fetch(authorizeUrl)).text();
-  const authRequest = page.match(/name="request" value="([^"]+)"/)[1];
-
-  const login = await fetch(`${app.baseUrl}/login`, {
-    method: 'POST',
-    redirect: 'manual',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: form({ request: authRequest, server: mock.url, username: mock.username, password, ...(allowSend ? { allowSend: 'on' } : {}) }),
-  });
-  if (login.status !== 302) return { login, page };
-
-  const location = new URL(login.headers.get('location'));
-  const tokenResponse = await fetch(`${app.baseUrl}/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: form({
-      grant_type: 'authorization_code', code: location.searchParams.get('code'), code_verifier: verifier,
-      client_id: clientId, redirect_uri: REDIRECT_URI,
-    }),
-  });
-  return { login, page, location, clientId, verifier, tokenResponse, tokens: await tokenResponse.clone().json() };
-}
-
-async function mcpClient(app, accessToken) {
-  const client = new Client({ name: 'test', version: '1.0.0' });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${app.baseUrl}/mcp`), {
-    requestInit: { headers: { Authorization: `Bearer ${accessToken}` } },
-  }));
-  return client;
-}
 
 describe('OAuth sign-in and remote MCP endpoint', () => {
   let mock;
@@ -91,6 +16,19 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
   after(async () => {
     await app.close();
     await mock.close();
+  });
+
+  test('the server address opens a landing page that explains how to connect', async () => {
+    const response = await fetch(`${app.baseUrl}/`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-security-policy'), /script-src 'self'/);
+    const page = await response.text();
+    assert.ok(page.includes(`${app.baseUrl}/mcp`), 'shows the MCP address of this server');
+    assert.doesNotMatch(page, /%MCP_URL%|%HOST%/);
+    for (const tool of ['mail_search', 'mail_get', 'mail_get_attachment', 'mail_attachment_link', 'mail_send']) assert.ok(page.includes(tool));
+    for (const asset of ['system.js', 'glyphs.js', 'landing.js', 'system.css', 'favicon.svg']) {
+      assert.equal((await fetch(`${app.baseUrl}/assets/${asset}`)).status, 200, asset);
+    }
   });
 
   test('publishes OAuth metadata for MCP clients', async () => {
@@ -139,7 +77,7 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
 
     const client = await mcpClient(app, tokens.access_token);
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((tool) => tool.name), ['mail_folders_list', 'mail_search', 'mail_get', 'mail_get_attachment']);
+    assert.deepEqual(tools.map((tool) => tool.name), ['mail_folders_list', 'mail_search', 'mail_get', 'mail_get_attachment', 'mail_attachment_link']);
     const result = await client.callTool({ name: 'mail_search', arguments: { limit: 3 } });
     assert.match(textOf(result), /Showing results 1-3 of 10/);
     await client.close();
@@ -167,7 +105,7 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
     assert.equal(refreshed.status, 200);
     const next = await refreshed.json();
     const client = await mcpClient(app, next.access_token);
-    assert.equal((await client.listTools()).tools.length, 4);
+    assert.equal((await client.listTools()).tools.length, 5);
     await client.close();
   });
 

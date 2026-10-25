@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kerio Connect MCP · Vít Koštejn</title>
+<meta name="description" content="Connect ChatGPT or Claude to a Kerio Connect mailbox: search and read mail, read and download attachments. Read-only by default.">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/assets/favicon.ico" sizes="any">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Azeret+Mono:wght@400;500&family=Commissioner:slnt,wght@-12,800;0,500;0,600;0,700;0,800&family=Literata:ital,opsz,wght@0,7..72,400..700;1,7..72,400..700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/assets/system.css">
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  .sheet { max-width: 1320px; margin: 0 auto; padding: 40px 80px 80px 120px; font-size: 17px; line-height: 28px; }
+  .top { display: flex; justify-content: space-between; align-items: center; gap: 24px; margin-bottom: 80px; }
+  .switch { display: flex; gap: 4px; }
+  .switch button { font: 600 14px/20px "Commissioner", sans-serif; color: var(--pencil); background: var(--paper); border: 1.5px solid transparent; padding: 6px 10px; cursor: pointer; }
+  .switch button[aria-pressed="true"] { color: var(--ink); border-color: var(--ink); }
+  h1 { font-family: "Commissioner", sans-serif; font-weight: 700; font-size: 40px; line-height: 48px; letter-spacing: -0.02em; margin: 0 0 24px; max-width: 880px; }
+  .sheet p { margin: 0 0 16px; max-width: 640px; }
+  .sheet section { margin-top: 80px; }
+  .head { margin-bottom: 32px; }
+  .head h2 { margin: 0; }
+  .plate svg { display: block; width: 100%; height: auto; }
+  .sheet .cap { max-width: 760px; margin-top: 12px; }
+  .scroll { overflow-x: auto; }
+  table.cells { min-width: 720px; }
+  table.cells td { padding-top: 10px; padding-bottom: 10px; vertical-align: top; }
+  td.what { width: 240px; font-family: "Commissioner", sans-serif; font-weight: 600; font-size: 15px; }
+  td.tool { width: 240px; }
+  .addr-box { display: inline-block; margin: 8px 0 24px; padding: 8px 14px; font-size: 18px; }
+  .foot { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; flex-wrap: wrap; margin-top: 80px; }
+  .foot a { display: flex; align-items: center; gap: 10px; text-decoration: none; font-size: 15px; }
+  .foot svg { width: 44px; height: 44px; flex: none; }
+  .foot .name { font-size: 28px; }
+  [hidden] { display: none !important; }
+  @media (max-width: 760px) {
+    .sheet { padding: 24px 16px 40px; }
+    .top { margin-bottom: 48px; }
+    h1 { font-size: 30px; line-height: 38px; }
+  }
+</style>
+</head>
+<body class="b">
+<div class="sheet">
+
+  <div class="top">
+    <span class="stamp">%HOST% · MCP server</span>
+    <div class="switch" role="group" aria-label="Language"><button type="button" data-set="en" aria-pressed="true">EN</button><button type="button" data-set="cs" aria-pressed="false">CS</button></div>
+  </div>
+
+  <!-- ===================================================== English -->
+  <main data-lang="en">
+    <h1>ChatGPT or Claude can search and read your Kerio Connect mail</h1>
+    <p>This server connects AI assistants to a Kerio Connect mailbox through the Model Context Protocol (MCP). Everyone signs in with their own Kerio account. The assistant can then find e-mails across the whole history, read them in full, read attachments and give you download links. Access is <span class="mk" data-mk="double">read-only by default</span>.</p>
+
+    <section>
+      <div class="head"><h2><span class="no">01</span>How a question travels to your mailbox</h2></div>
+      <div class="plate box"><svg id="fig-en" viewBox="0 0 1160 440" font-family="Commissioner" role="img" aria-label="Employees ask ChatGPT or Claude; the assistant asks this server; the server reads from the company Kerio mail server and returns only what that person may read."></svg></div>
+      <p class="cap">fig. 1 · the path of a question from the assistant to the company mailbox and back; violet = people, magenta = AI, green = this server, blue = mail</p>
+    </section>
+
+    <section>
+      <div class="head"><h2><span class="no">02</span>Connecting takes a minute</h2></div>
+      <p>Add this address to your assistant as a custom connector:</p>
+      <div class="box addr-box"><span class="addr">%MCP_URL%</span></div>
+      <div class="scroll">
+        <table class="cells">
+          <tr><th>assistant</th><th>where</th></tr>
+          <tr><td class="what">Claude (web, desktop)</td><td>Settings → Connectors → Add custom connector → paste the address.</td></tr>
+          <tr><td class="what">ChatGPT</td><td>Settings → Apps &amp; Connectors → Developer mode → Create → paste the address, authentication OAuth. In a workspace an admin adds it once; everyone then connects with their own account.</td></tr>
+          <tr><td class="what">Claude Code</td><td><span class="addr">claude mcp add --transport http --scope user kerio %MCP_URL%</span>, then <span class="addr">/mcp</span> → kerio → Authenticate.</td></tr>
+        </table>
+      </div>
+      <p style="margin-top:24px">A sign-in page opens: enter your Kerio server (for example <span class="addr">mail.example.com</span>), your username and your password. Use your normal account, not an administrator account.</p>
+    </section>
+
+    <section>
+      <div class="head"><h2><span class="no">03</span>What the assistant can do</h2></div>
+      <div class="scroll">
+        <table class="cells">
+          <tr><th>tool</th><th>what it does</th></tr>
+          <tr><td class="tool"><span class="addr">mail_folders_list</span></td><td>Lists your mail folders and which one is the inbox, sent items, drafts, deleted items or junk.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_search</span></td><td>Searches all mail or one folder by text, sender, recipient, subject, date or unread, newest first and across the whole history. Every result says whether it is incoming or outgoing.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_get</span></td><td>Reads one e-mail in full, with its list of attachments.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_get_attachment</span></td><td>Reads an attachment: text from PDF, Word, Excel, CSV and text files; images as images.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_attachment_link</span></td><td>Gives download links for attachments in their original format, one per file and one ZIP for all. Links work for 10 minutes.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_send</span></td><td>Sends a plain-text e-mail. Only when this server allows sending and you ticked “Allow sending e-mails” when signing in.</td></tr>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="head"><h2><span class="no">04</span>Your password and your mail stay yours</h2></div>
+      <div class="scroll">
+        <table class="cells">
+          <tr><td class="what">nothing is stored</td><td>Your password is only kept encrypted inside the key your assistant holds. The server has no database and no files with your data.</td></tr>
+          <tr><td class="what">reading changes nothing</td><td>Messages are not marked as read, moved, flagged or deleted.</td></tr>
+          <tr><td class="what">sending needs two yeses</td><td>The server must allow it and you must tick it at sign-in. The assistant cannot switch it on, and it never sends a message twice on its own.</td></tr>
+          <tr><td class="what">mail is untrusted</td><td>The assistant is told to treat e-mails and attachments as data and never to follow instructions written in them.</td></tr>
+          <tr><td class="what">signing out</td><td>Remove the connector in your assistant. Without use, the key expires after 90 days.</td></tr>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===================================================== Čeština -->
+  <main data-lang="cs" hidden>
+    <h1>ChatGPT nebo Claude prohledá a přečte vaši poštu v Kerio Connect</h1>
+    <p>Tento server propojuje AI asistenty se schránkou Kerio Connect přes Model Context Protocol (MCP). Každý se přihlásí svým vlastním účtem v Keriu. Asistent pak umí najít e-maily v celé historii, přečíst je celé, přečíst přílohy a dát vám odkazy ke stažení. Přístup je <span class="mk" data-mk="double">ve výchozím stavu jen pro čtení</span>.</p>
+
+    <section>
+      <div class="head"><h2><span class="no">01</span>Jak se dotaz dostane k vaší poště</h2></div>
+      <div class="plate box"><svg id="fig-cs" viewBox="0 0 1160 440" font-family="Commissioner" role="img" aria-label="Zaměstnanci se ptají ChatGPT nebo Claude; asistent se ptá tohoto serveru; server čte z firemního poštovního serveru Kerio a vrací jen to, co si daný člověk smí přečíst."></svg></div>
+      <p class="cap">fig. 1 · cesta dotazu od asistenta k firemní poště a zpět; fialová = lidé, purpurová = AI, zelená = tento server, modrá = pošta</p>
+    </section>
+
+    <section>
+      <div class="head"><h2><span class="no">02</span>Připojení zabere minutu</h2></div>
+      <p>Tuto adresu přidejte do svého asistenta jako vlastní connector:</p>
+      <div class="box addr-box"><span class="addr">%MCP_URL%</span></div>
+      <div class="scroll">
+        <table class="cells">
+          <tr><th>asistent</th><th>kde</th></tr>
+          <tr><td class="what">Claude (web, aplikace)</td><td>Nastavení → Konektory → Přidat vlastní konektor → vložit adresu.</td></tr>
+          <tr><td class="what">ChatGPT</td><td>Nastavení → Aplikace a konektory → Režim pro vývojáře → Vytvořit → vložit adresu, ověření OAuth. Ve workspace ho správce přidá jednou; každý se pak připojí svým účtem.</td></tr>
+          <tr><td class="what">Claude Code</td><td><span class="addr">claude mcp add --transport http --scope user kerio %MCP_URL%</span>, potom <span class="addr">/mcp</span> → kerio → Authenticate.</td></tr>
+        </table>
+      </div>
+      <p style="margin-top:24px">Otevře se přihlašovací stránka: zadejte svůj Kerio server (například <span class="addr">mail.firma.cz</span>), uživatelské jméno a heslo. Použijte svůj běžný účet, ne účet správce.</p>
+    </section>
+
+    <section>
+      <div class="head"><h2><span class="no">03</span>Co asistent umí</h2></div>
+      <div class="scroll">
+        <table class="cells">
+          <tr><th>nástroj</th><th>co dělá</th></tr>
+          <tr><td class="tool"><span class="addr">mail_folders_list</span></td><td>Vypíše vaše poštovní složky a pozná, která je doručená, odeslaná pošta, koncepty, koš nebo nevyžádaná pošta.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_search</span></td><td>Hledá v celé poště nebo v jedné složce podle textu, odesílatele, příjemce, předmětu, data nebo nepřečtených, od nejnovějších a v celé historii. U každého výsledku řekne, jestli je příchozí, nebo odchozí.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_get</span></td><td>Přečte jeden e-mail celý, se seznamem příloh.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_get_attachment</span></td><td>Přečte přílohu: text z PDF, Wordu, Excelu, CSV a textových souborů; obrázky jako obrázky.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_attachment_link</span></td><td>Dá odkazy ke stažení příloh v původním formátu, na každý soubor zvlášť a jeden ZIP se všemi. Odkazy platí 10 minut.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_send</span></td><td>Odešle e-mail jako prostý text. Jen pokud server odesílání povoluje a vy jste při přihlášení zaškrtli „Povolit odesílání e-mailů“.</td></tr>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <div class="head"><h2><span class="no">04</span>Vaše heslo i pošta zůstávají vaše</h2></div>
+      <div class="scroll">
+        <table class="cells">
+          <tr><td class="what">nic se neukládá</td><td>Heslo je jen zašifrované v klíči, který drží váš asistent. Server nemá žádnou databázi ani soubory s vašimi údaji.</td></tr>
+          <tr><td class="what">čtení nic nemění</td><td>Zprávy se neoznačí jako přečtené, nepřesunou, neoznačí příznakem ani nesmažou.</td></tr>
+          <tr><td class="what">odesílání chce dvě ano</td><td>Musí ho povolit server a vy ho musíte zaškrtnout při přihlášení. Asistent si ho sám zapnout nemůže a nikdy sám neodešle zprávu dvakrát.</td></tr>
+          <tr><td class="what">pošta je nedůvěryhodná</td><td>Asistent má pokyn brát e-maily a přílohy jako data a nikdy neplnit pokyny, které jsou v nich napsané.</td></tr>
+          <tr><td class="what">odhlášení</td><td>Odeberte connector ve svém asistentovi. Bez používání klíč po 90 dnech vyprší.</td></tr>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div class="foot">
+    <a href="https://github.com/kostejnv/kerio-connect-mcp"><svg data-sticker="github" aria-hidden="true"></svg><span class="addr">github.com/kostejnv/kerio-connect-mcp</span></a>
+    <div class="name"><b>V</b>ít <b class="nm">K</b>oštejn</div>
+  </div>
+
+</div>
+<script src="/assets/system.js"></script>
+<script src="/assets/glyphs.js"></script>
+<script src="/assets/landing.js"></script>
+</body>
+</html>

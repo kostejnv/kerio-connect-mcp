@@ -12,7 +12,7 @@ const VERSION = 'v1';
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
 
-export type TokenPurpose = 'client' | 'auth-request' | 'code' | 'access' | 'refresh';
+export type TokenPurpose = 'client' | 'auth-request' | 'code' | 'access' | 'refresh' | 'download';
 
 interface Envelope<T> {
   exp?: number;

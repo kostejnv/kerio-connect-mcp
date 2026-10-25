@@ -32,8 +32,16 @@ const UNTRUSTED_END = '<<<END UNTRUSTED EMAIL CONTENT>>>';
 export interface ToolResult {
   text: string;
   images?: Array<{ data: string; mimeType: string }>;
+  /** Files the client can offer for download (MCP resource_link). */
+  links?: Array<{ uri: string; name: string; mimeType?: string; description?: string }>;
   isError?: boolean;
 }
+
+/** Issues a short-lived download URL for attachments of one mail (remote mode only). */
+export type DownloadLinkIssuer = (request: { mailId: string; attachments: number[]; zip: boolean; fileName: string }) => string;
+export const DOWNLOAD_LINK_MINUTES = 10;
+/** Upper bound for all attachments bundled into one ZIP. */
+export const MAX_ZIP_BYTES = 50 * 1024 * 1024;
 
 // ============================================================================
 // Schemas
@@ -88,6 +96,13 @@ export const MailGetAttachmentSchema = z.object({
     .describe('Character position in the extracted text to start from (nextOffset from the previous part).'),
   maxChars: z.number().int().min(1000).max(MAX_BODY_CHARS).optional().default(DEFAULT_BODY_CHARS)
     .describe(`Maximum characters of extracted text in this call (1000-${MAX_BODY_CHARS}, default ${DEFAULT_BODY_CHARS}).`),
+});
+
+export const MailAttachmentLinkSchema = z.object({
+  id: z.string().min(1)
+    .describe('Message ID exactly as returned by mail_search.'),
+  attachments: z.array(z.number().int().min(1)).min(1).optional()
+    .describe('Attachment numbers as listed by mail_get. Omit for all attachments except inline images (e.g. signature logos).'),
 });
 
 export const MailSendSchema = z.object({
@@ -160,6 +175,18 @@ const readToolDefinitions = [
   },
 ];
 
+const attachmentLinkToolDefinition = {
+  name: 'mail_attachment_link',
+  title: 'Download e-mail attachments',
+  description:
+    'Get download links for attachments in their original format (PDF, XLSX, DOCX, images, anything), to save them as files. ' +
+    `Returns one link per attachment and, for several attachments, one ZIP link with all of them. Links work for ${DOWNLOAD_LINK_MINUTES} minutes. ` +
+    'If you can run shell commands (e.g. Claude Code), download the files yourself: curl -fsSL -o "<file name>" "<link>". ' +
+    'Otherwise give the links to the user to click. Use mail_get_attachment instead when you only need to read the content. Read-only.',
+  inputSchema: inputSchema(MailAttachmentLinkSchema),
+  annotations: readOnlyAnnotations,
+};
+
 const sendToolDefinition = {
   name: 'mail_send',
   title: 'Send e-mail',
@@ -178,8 +205,12 @@ const sendToolDefinition = {
   },
 };
 
-export function getMailToolDefinitions(sendEnabled: boolean) {
-  return sendEnabled ? [...readToolDefinitions, sendToolDefinition] : readToolDefinitions;
+export function getMailToolDefinitions(sendEnabled: boolean, { downloadLinks = false } = {}) {
+  return [
+    ...readToolDefinitions,
+    ...(downloadLinks ? [attachmentLinkToolDefinition] : []),
+    ...(sendEnabled ? [sendToolDefinition] : []),
+  ];
 }
 
 // ============================================================================
@@ -603,8 +634,13 @@ async function findMail(client: KerioClient, id: string): Promise<{ mail: KerioM
   return { error: { text: `ERROR: Message not found: ${id}${reason ? ` (${reason})` : ''}`, isError: true } };
 }
 
+/** Images embedded in the HTML body, typically logos in a signature. */
+function isInlineImage(attachment: KerioAttachment): boolean {
+  return Boolean(attachment.contentId) && classifyAttachment(attachment.name, attachment.contentType) === 'image';
+}
+
 function describeAttachment(attachment: KerioAttachment, number: number): string {
-  const details = [attachment.contentType, formatSize(attachment.size), attachment.contentId && !attachment.name ? 'inline image' : '']
+  const details = [attachment.contentType, formatSize(attachment.size), isInlineImage(attachment) ? 'inline image' : '']
     .filter(Boolean)
     .join(', ');
   return `  [${number}] ${attachment.name || '(unnamed)'}${details ? ` (${details})` : ''}`;
@@ -688,6 +724,72 @@ export async function mailGetAttachment(client: KerioClient, args: unknown): Pro
     .replace(/<<<(BEGIN|END) UNTRUSTED EMAIL CONTENT>>>/g, '[removed marker]');
   const { status, slice } = textPart(text, params.offset, params.maxChars, 'Extracted text', 'mail_get_attachment');
   return { text: `Attachment ${title}\n${status}\n\n${untrusted(slice)}` };
+}
+
+/** A file name that is safe on every operating system. */
+function safeFileName(name: string): string {
+  return name.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '_').replace(/^[.\s]+|[.\s]+$/g, '').slice(0, 120) || 'attachment';
+}
+
+export async function mailAttachmentLink(client: KerioClient, args: unknown, issueLink: DownloadLinkIssuer): Promise<ToolResult> {
+  const params = MailAttachmentLinkSchema.parse(args);
+  const found = await findMail(client, params.id);
+  if ('error' in found) return found.error;
+
+  const attachments = found.mail.attachments ?? [];
+  if (attachments.length === 0) return { text: 'The message has no attachments.' };
+
+  const missing = (params.attachments ?? []).filter((number) => !attachments[number - 1]);
+  if (missing.length > 0) {
+    return { text: `ERROR: The message has ${attachments.length} attachment(s); there is no attachment ${missing.join(', ')}.`, isError: true };
+  }
+
+  const all = attachments.map((attachment, index) => ({ attachment, number: index + 1 }));
+  const requested = params.attachments ? all.filter(({ number }) => params.attachments!.includes(number)) : all;
+  const skipped = params.attachments ? [] : requested.filter(({ attachment }) => isInlineImage(attachment));
+  const chosen = requested.filter((item) => !skipped.includes(item));
+
+  const lines: string[] = [];
+  const links: NonNullable<ToolResult['links']> = [];
+  const downloadable: typeof chosen = [];
+  for (const { attachment, number } of chosen) {
+    const name = safeFileName(attachment.name || `attachment-${number}`);
+    if (!attachment.url) {
+      lines.push(`${describeAttachment(attachment, number)}  (no download available)`);
+    } else if ((attachment.size ?? 0) > MAX_ATTACHMENT_BYTES) {
+      lines.push(`${describeAttachment(attachment, number)}  (too large, limit ${formatSize(MAX_ATTACHMENT_BYTES)})`);
+    } else {
+      const uri = issueLink({ mailId: found.mail.id, attachments: [number], zip: false, fileName: name });
+      lines.push(`${describeAttachment(attachment, number)}\n      file: ${name}\n      link: ${uri}`);
+      links.push({ uri, name, mimeType: attachment.contentType, description: `Attachment ${number} of "${found.mail.subject ?? ''}"` });
+      downloadable.push({ attachment, number });
+    }
+  }
+
+  let zipLine = '';
+  if (downloadable.length > 1) {
+    const total = downloadable.reduce((sum, { attachment }) => sum + (attachment.size ?? 0), 0);
+    if (total > MAX_ZIP_BYTES) {
+      zipLine = `\nAll as ZIP: not available, the files together exceed ${formatSize(MAX_ZIP_BYTES)}.`;
+    } else {
+      const name = `${safeFileName(found.mail.subject || 'attachments').slice(0, 80)}.zip`;
+      const uri = issueLink({ mailId: found.mail.id, attachments: downloadable.map(({ number }) => number), zip: true, fileName: name });
+      zipLine = `\nAll ${downloadable.length} files as one ZIP:\n      file: ${name}\n      link: ${uri}`;
+      links.push({ uri, name, mimeType: 'application/zip', description: `All attachments of "${found.mail.subject ?? ''}"` });
+    }
+  }
+
+  const skippedLine = skipped.length > 0
+    ? `\nSkipped inline images (request them by number if needed): ${skipped.map(({ attachment, number }) => `[${number}] ${attachment.name || '(unnamed)'}`).join(', ')}`
+    : '';
+  const howTo = links.length > 0
+    ? `\nLinks work for ${DOWNLOAD_LINK_MINUTES} minutes. With a shell: curl -fsSL -o "<file>" "<link>". Otherwise give the links to the user.`
+    : '';
+
+  return {
+    text: `Attachments of "${found.mail.subject ?? ''}":\n${lines.join('\n') || '  (none selected)'}${zipLine}${skippedLine}${howTo}`,
+    links,
+  };
 }
 
 // ============================================================================
