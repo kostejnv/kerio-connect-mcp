@@ -15,8 +15,6 @@ export interface LocalizedText {
 export interface LoginPageOptions {
   authRequest: string;
   pending: PendingAuthorization;
-  /** Whether the server allows connections to opt in to sending. */
-  sendOptionAvailable: boolean;
   values?: { server?: string; username?: string };
   error?: LocalizedText;
 }
@@ -50,8 +48,6 @@ const STYLES = `
   p { color: var(--muted); margin: 0 0 20px; }
   form label { display: block; font-weight: 600; margin-bottom: 14px; }
   input[type=text], input[type=password] { box-sizing: border-box; width: 100%; margin-top: 6px; padding: 10px 12px; font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 8px; }
-  form label.check { font-weight: 500; }
-  .check small { display: block; color: var(--muted); font-weight: 400; margin-left: 24px; }
   button { width: 100%; padding: 11px; font: inherit; font-weight: 600; color: #fff; background: var(--accent); border: 0; border-radius: 8px; cursor: pointer; }
   .error { color: var(--error); margin-bottom: 16px; }
   .note { font-size: .85rem; margin: 16px 0 0; }
@@ -86,13 +82,6 @@ export function sendLoginPage(res: Response, options: LoginPageOptions, status =
   const redirectOrigin = new URL(options.pending.redirectUri).origin;
   const client = `<strong>${escapeHtml(options.pending.clientName ?? 'MCP client')}</strong>`;
   const clientHost = escapeHtml(new URL(options.pending.redirectUri).host);
-  const sendOption = options.sendOptionAvailable
-    ? `<label class="check"><input type="checkbox" name="allowSend"> ${localized({ en: 'Allow sending e-mails', cs: 'Povolit odesílání e-mailů' })}
-        <small>${localized({
-          en: 'Unchecked, the assistant can only read mail. This cannot be changed by the assistant later, only by connecting again.',
-          cs: 'Bez zaškrtnutí může asistent poštu jen číst. Volbu nelze později změnit z asistenta, jen novým připojením.',
-        })}</small></label>`
-    : '';
   const error = options.error
     ? `<div class="error" role="alert">${localized({ en: escapeHtml(options.error.en), cs: escapeHtml(options.error.cs) })}</div>`
     : '';
@@ -126,7 +115,6 @@ export function sendLoginPage(res: Response, options: LoginPageOptions, status =
       <label>${localized({ en: 'Password', cs: 'Heslo' })}
         <input type="password" name="password" required autocomplete="current-password">
       </label>
-      ${sendOption}
       <button type="submit">${localized({ en: 'Sign in and allow access', cs: 'Přihlásit a povolit přístup' })}</button>
     </form>
     <p class="note">${localized({

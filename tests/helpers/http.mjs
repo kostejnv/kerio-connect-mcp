@@ -10,13 +10,13 @@ import { testNetwork } from './clients.mjs';
 
 export const REDIRECT_URI = 'https://claude.ai/api/mcp/auth_callback';
 
-export async function startApp({ allowSend = false, network: networkOverrides = {}, tokenKey = crypto.randomBytes(32) } = {}) {
+export async function startApp({ network: networkOverrides = {}, tokenKey = crypto.randomBytes(32) } = {}) {
   const server = http.createServer();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const baseUrl = `http://localhost:${server.address().port}`;
   const network = testNetwork(networkOverrides);
   const app = createHttpApp(
-    { transport: 'http', network, publicUrl: new URL(baseUrl), port: 0, tokenKey, allowSend },
+    { transport: 'http', network, publicUrl: new URL(baseUrl), port: 0, tokenKey },
     createKerioDispatcher(network)
   );
   server.on('request', app);
@@ -26,7 +26,7 @@ export async function startApp({ allowSend = false, network: networkOverrides = 
 export const form = (fields) => new URLSearchParams(fields).toString();
 
 /** Walks through dynamic client registration, the sign-in form and the PKCE code exchange. */
-export async function signIn(app, mock, { password = mock.password, allowSend = false } = {}) {
+export async function signIn(app, mock, { password = mock.password } = {}) {
   const registration = await fetch(`${app.baseUrl}/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -55,7 +55,7 @@ export async function signIn(app, mock, { password = mock.password, allowSend = 
     method: 'POST',
     redirect: 'manual',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: form({ request: authRequest, server: mock.url, username: mock.username, password, ...(allowSend ? { allowSend: 'on' } : {}) }),
+    body: form({ request: authRequest, server: mock.url, username: mock.username, password }),
   });
   if (login.status !== 302) return { login, page };
 

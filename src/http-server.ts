@@ -63,7 +63,7 @@ class KerioClientPool {
 
   private keyOf(grant: Grant): string {
     const { server, username, password } = grant.credentials;
-    return crypto.createHash('sha256').update(JSON.stringify([server, username, password, grant.sendEnabled])).digest('hex');
+    return crypto.createHash('sha256').update(JSON.stringify([server, username, password])).digest('hex');
   }
 
   private evictIdle(): void {
@@ -93,18 +93,11 @@ function loginErrorMessage(error: unknown): LocalizedText {
 export function createHttpApp(config: HttpConfig, dispatcher: Dispatcher) {
   const mcpUrl = new URL('/mcp', config.publicUrl);
   const sealer = new TokenSealer(config.tokenKey);
-  // The master switch applies to every request, so turning it off also covers connections granted sending earlier.
-  const newClient = (grant: Grant) =>
-    new KerioClient({
-      credentials: grant.credentials,
-      network: config.network,
-      dispatcher,
-      sendEnabled: config.allowSend && grant.sendEnabled,
-    });
+  const newClient = (grant: Grant) => new KerioClient({ credentials: grant.credentials, network: config.network, dispatcher });
   const pool = new KerioClientPool(newClient);
 
   const provider = new StatelessOAuthProvider(sealer, (res, pending, authRequest) =>
-    sendLoginPage(res, { pending, authRequest, sendOptionAvailable: config.allowSend })
+    sendLoginPage(res, { pending, authRequest })
   );
 
   const app = express();
@@ -162,19 +155,18 @@ export function createHttpApp(config: HttpConfig, dispatcher: Dispatcher) {
       try {
         const grant: Grant = {
           credentials: { server: normalizeServerUrl(values.server), username: values.username.trim(), password: body.password ?? '' },
-          sendEnabled: config.allowSend && body.allowSend === 'on',
         };
         // Only verified credentials end up in a token (and in the client pool).
         const client = newClient(grant);
         await client.ensureAuthenticated();
         pool.put(grant, client);
-        console.error(`[Auth] Connected mailbox on ${new URL(grant.credentials.server).host} (send ${grant.sendEnabled ? 'enabled' : 'disabled'})`);
+        console.error(`[Auth] Connected mailbox on ${new URL(grant.credentials.server).host}`);
         res.redirect(302, provider.completeAuthorization(pending, grant));
       } catch (error) {
         console.error(`[Auth] Sign-in failed: ${error instanceof Error ? error.name : 'Error'}`);
         sendLoginPage(
           res,
-          { pending, authRequest: body.request!, sendOptionAvailable: config.allowSend, values, error: loginErrorMessage(error) },
+          { pending, authRequest: body.request!, values, error: loginErrorMessage(error) },
           400
         );
       }
@@ -229,7 +221,7 @@ export function createHttpApp(config: HttpConfig, dispatcher: Dispatcher) {
       }
 
       try {
-        const file = await downloadTicketFile(pool.get({ credentials: ticket.credentials, sendEnabled: false }), ticket);
+        const file = await downloadTicketFile(pool.get({ credentials: ticket.credentials }), ticket);
         res.set({
           'Content-Type': file.contentType,
           'Content-Disposition': contentDisposition(file.name),

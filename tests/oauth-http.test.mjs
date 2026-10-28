@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import crypto from 'node:crypto';
 import { after, before, describe, test } from 'node:test';
 
 import { textOf } from './helpers/clients.mjs';
@@ -11,7 +10,7 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
   let app;
   before(async () => {
     mock = await startMockKerio();
-    app = await startApp({ allowSend: false });
+    app = await startApp();
   });
   after(async () => {
     await app.close();
@@ -25,7 +24,10 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
     const page = await response.text();
     assert.ok(page.includes(`${app.baseUrl}/mcp`), 'shows the MCP address of this server');
     assert.doesNotMatch(page, /%MCP_URL%|%HOST%/);
-    for (const tool of ['mail_search', 'mail_get', 'mail_get_attachment', 'mail_attachment_link', 'mail_send']) assert.ok(page.includes(tool));
+    for (const tool of ['mail_search', 'mail_get', 'mail_get_attachment', 'mail_attachment_link', 'mail_create_draft', 'mail_update_draft']) {
+      assert.ok(page.includes(tool), tool);
+    }
+    assert.doesNotMatch(page, /mail_send/);
     for (const asset of ['system.js', 'glyphs.js', 'landing.js', 'system.css', 'favicon.svg']) {
       assert.equal((await fetch(`${app.baseUrl}/assets/${asset}`)).status, 200, asset);
     }
@@ -48,12 +50,12 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
     assert.equal(forged.status, 401);
   });
 
-  test('the sign-in page asks for server, login and password, with no send option by default', async () => {
+  test('the sign-in page asks only for server, login and password', async () => {
     const { page } = await signIn(app, mock, { password: 'wrong' });
     assert.match(page, /name="server"/);
     assert.match(page, /name="username"/);
     assert.match(page, /name="password"/);
-    assert.doesNotMatch(page, /allowSend/);
+    assert.doesNotMatch(page, /type="checkbox"|allowSend/);
     assert.match(page, /claude\.ai/);
   });
 
@@ -66,7 +68,7 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
     assert.doesNotMatch(page, /wrong/);
   });
 
-  test('a successful sign-in yields tokens that work with an MCP client, read-only', async () => {
+  test('a successful sign-in yields tokens that work with an MCP client', async () => {
     const { location, tokens, tokenResponse } = await signIn(app, mock);
     assert.equal(location.origin + location.pathname, REDIRECT_URI);
     assert.equal(location.searchParams.get('state'), 'state-123');
@@ -77,7 +79,9 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
 
     const client = await mcpClient(app, tokens.access_token);
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((tool) => tool.name), ['mail_folders_list', 'mail_search', 'mail_get', 'mail_get_attachment', 'mail_attachment_link']);
+    assert.deepEqual(tools.map((tool) => tool.name), [
+      'mail_folders_list', 'mail_search', 'mail_get', 'mail_get_attachment', 'mail_attachment_link', 'mail_create_draft', 'mail_update_draft',
+    ]);
     const result = await client.callTool({ name: 'mail_search', arguments: { limit: 3 } });
     assert.match(textOf(result), /Showing results 1-3 of 10/);
     await client.close();
@@ -105,17 +109,30 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
     assert.equal(refreshed.status, 200);
     const next = await refreshed.json();
     const client = await mcpClient(app, next.access_token);
-    assert.equal((await client.listTools()).tools.length, 5);
+    assert.equal((await client.listTools()).tools.length, 7);
     await client.close();
   });
 
-  test('the send checkbox has no effect when the server does not allow sending', async () => {
-    const { tokens } = await signIn(app, mock, { allowSend: true });
+  test('there is no way to send: a mail_send call is refused as an unknown tool', async () => {
+    const { tokens } = await signIn(app, mock);
     const client = await mcpClient(app, tokens.access_token);
-    assert.ok(!(await client.listTools()).tools.some((tool) => tool.name === 'mail_send'));
     const result = await client.callTool({ name: 'mail_send', arguments: { to: ['a@example.org'], subject: 's', body: 'b' } });
     assert.equal(result.isError, true);
+    assert.match(textOf(result), /Unknown tool/);
     assert.equal(mock.callsOf('Mails.create').length, 0);
+    await client.close();
+  });
+
+  test('a draft can be saved through the remote endpoint', async () => {
+    const { tokens } = await signIn(app, mock);
+    const client = await mcpClient(app, tokens.access_token);
+    const result = await client.callTool({
+      name: 'mail_create_draft',
+      arguments: { to: ['a@example.org'], subject: 'Hello', body: 'Text' },
+    });
+    assert.match(textOf(result), /^Draft saved in the Drafts folder\./);
+    const [create] = mock.callsOf('Mails.create');
+    assert.equal(create.params.mails[0].send, false);
     await client.close();
   });
 
@@ -134,55 +151,6 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
       }
     } finally {
       await strictApp.close();
-    }
-  });
-});
-
-describe('sending enabled on the server', () => {
-  let mock;
-  let app;
-  before(async () => {
-    mock = await startMockKerio();
-    app = await startApp({ allowSend: true });
-  });
-  after(async () => {
-    await app.close();
-    await mock.close();
-  });
-
-  test('the user opts in per connection with the checkbox; unchecked stays read-only', async () => {
-    const readOnly = await signIn(app, mock);
-    assert.match(readOnly.page, /name="allowSend"/);
-    const readClient = await mcpClient(app, readOnly.tokens.access_token);
-    assert.ok(!(await readClient.listTools()).tools.some((tool) => tool.name === 'mail_send'));
-    await readClient.close();
-
-    const withSend = await signIn(app, mock, { allowSend: true });
-    const sendClient = await mcpClient(app, withSend.tokens.access_token);
-    assert.ok((await sendClient.listTools()).tools.some((tool) => tool.name === 'mail_send'));
-    const result = await sendClient.callTool({ name: 'mail_send', arguments: { to: ['a@example.org'], subject: 's', body: 'b' } });
-    assert.match(textOf(result), /^SENT\./);
-    assert.equal(mock.callsOf('Mails.create').length, 1);
-    await sendClient.close();
-  });
-
-  test('turning the master switch off also withdraws sending from existing connections', async () => {
-    const tokenKey = crypto.randomBytes(32);
-    const sendApp = await startApp({ allowSend: true, tokenKey });
-    const { tokens } = await signIn(sendApp, mock, { allowSend: true });
-    await sendApp.close();
-
-    const restartedWithoutSend = await startApp({ allowSend: false, tokenKey });
-    try {
-      const client = await mcpClient(restartedWithoutSend, tokens.access_token);
-      assert.ok(!(await client.listTools()).tools.some((tool) => tool.name === 'mail_send'));
-      const creates = mock.callsOf('Mails.create').length;
-      const result = await client.callTool({ name: 'mail_send', arguments: { to: ['a@example.org'], subject: 's', body: 'b' } });
-      assert.equal(result.isError, true);
-      assert.equal(mock.callsOf('Mails.create').length, creates);
-      await client.close();
-    } finally {
-      await restartedWithoutSend.close();
     }
   });
 });

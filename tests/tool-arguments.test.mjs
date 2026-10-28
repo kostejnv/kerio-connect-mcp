@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { normalizeToolArguments } from '../dist/tool-arguments.js';
-import { MailSearchSchema, MailSendSchema, getMailToolDefinitions } from '../dist/mail-tools.js';
+import { MailCreateDraftSchema, MailSearchSchema, getMailToolDefinitions } from '../dist/mail-tools.js';
 
 const schemaFor = (name) => {
-  const definition = getMailToolDefinitions(true).find((tool) => tool.name === name);
+  const definition = getMailToolDefinitions().find((tool) => tool.name === name);
   assert.ok(definition, `Missing tool definition: ${name}`);
   return definition.inputSchema;
 };
@@ -22,11 +22,11 @@ test('normalizes Qwen-style numeric and boolean arguments using the advertised t
 test('normalizes double-serialized recipient arrays', () => {
   const normalized = normalizeToolArguments(
     { to: '["timon@example.com"]', subject: 'MCP-Test', body: 'Danke für den Test.' },
-    schemaFor('mail_send')
+    schemaFor('mail_create_draft')
   );
 
   assert.deepEqual(normalized.to, ['timon@example.com']);
-  assert.deepEqual(MailSendSchema.parse(normalized).to, ['timon@example.com']);
+  assert.deepEqual(MailCreateDraftSchema.parse(normalized).to, ['timon@example.com']);
 });
 
 test('keeps ordinary strings and invalid values untouched', () => {

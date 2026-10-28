@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Kerio Connect MCP Server — read (and optionally send) Kerio Connect mail via MCP.
+ * Kerio Connect MCP Server — read Kerio Connect mail and prepare drafts via MCP.
  *
  * MCP_TRANSPORT=stdio (default): local use with one mailbox from KERIO_SERVER/KERIO_USERNAME/KERIO_PASSWORD.
  * MCP_TRANSPORT=http:            remote MCP endpoint; users sign in with their own Kerio account via OAuth.
@@ -23,12 +23,11 @@ async function runStdio(config: StdioConfig): Promise<void> {
     credentials: { ...config.credentials, server: normalizeServerUrl(config.credentials.server) },
     network: config.network,
     dispatcher: createKerioDispatcher(config.network),
-    sendEnabled: config.sendEnabled,
   });
 
   console.error(`[Server] Connecting to ${config.credentials.server} as ${config.credentials.username}...`);
   await client.ensureAuthenticated();
-  console.error(`[Server] Authenticated. Sending e-mail is ${config.sendEnabled ? 'ENABLED' : 'disabled'}.`);
+  console.error('[Server] Authenticated.');
 
   await createMcpServer(client).connect(new StdioServerTransport());
   console.error('[Server] Kerio MCP server running on stdio');
@@ -38,7 +37,6 @@ function runHttp(config: HttpConfig): void {
   const app = createHttpApp(config, createKerioDispatcher(config.network));
   app.listen(config.port, () => {
     console.error(`[Server] Kerio MCP server listening on port ${config.port}, public URL ${new URL('/mcp', config.publicUrl).href}`);
-    console.error(`[Server] Sending e-mail can be enabled per connection: ${config.allowSend ? 'yes' : 'no'}`);
   });
 }
 

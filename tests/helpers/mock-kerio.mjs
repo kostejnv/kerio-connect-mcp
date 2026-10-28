@@ -14,10 +14,12 @@ export const READ_METHODS = ['Session.login', 'Folders.get', 'Mails.get', 'Mails
 
 export const INBOX = 'keriostorage://folder/example.com/jan/inbox';
 export const SENT = 'keriostorage://folder/example.com/jan/sent';
+export const DRAFTS = 'keriostorage://folder/example.com/jan/drafts';
 export const FOLDERS = [
   { id: 'keriostorage://folder/example.com/jan/root', name: 'Mailbox', type: 'FRoot' },
   { id: INBOX, name: 'INBOX', type: 'FMail', subType: 'FSubInbox', parentId: 'keriostorage://folder/example.com/jan/root' },
   { id: SENT, name: 'Sent Items', type: 'FMail', subType: 'FSubSentItems', parentId: 'keriostorage://folder/example.com/jan/root' },
+  { id: DRAFTS, name: 'Drafts', type: 'FMail', subType: 'FSubDrafts', parentId: 'keriostorage://folder/example.com/jan/root' },
   { id: 'keriostorage://folder/example.com/jan/projects', name: 'Projects', type: 'FMail', subType: 'FSubNone', parentId: INBOX },
   { id: 'keriostorage://folder/example.com/jan/calendar', name: 'Calendar', type: 'FCalendar' },
 ];
@@ -54,6 +56,30 @@ export function makeMails(count, overrides = () => ({})) {
   }));
 }
 
+/** A draft as Kerio stores it: in Drafts, with its own copies of the attachments and a Message-ID. */
+function storedDraft(id, input) {
+  const number = id.split('/').pop();
+  return {
+    id,
+    folderId: DRAFTS,
+    from: input.from,
+    to: input.to,
+    cc: input.cc,
+    bcc: input.bcc,
+    subject: input.subject,
+    receiveDate: kerioDate(new Date()),
+    isSeen: true,
+    isDraft: true,
+    hasAttachment: (input.attachments ?? []).length > 0,
+    displayableParts: input.displayableParts,
+    attachments: (input.attachments ?? []).map((attachment, index) => ({
+      ...attachment,
+      id: `keriostorage://attachment/example.com/jan/drafts/${number}/0-${index + 1}`,
+    })),
+    headers: [{ type: 'mhMessageID', value: `<draft-${number}@example.com>` }, ...(input.headers ?? [])],
+  };
+}
+
 /**
  * @param files map of attachment download path → Buffer, served at that path for valid sessions
  */
@@ -64,9 +90,9 @@ export async function startMockKerio({ mails = makeMails(10), files = {}, userna
     calls: [],
     sessions: new Set(),
     logins: 0,
-    sent: [],
-    /** 'ok' | 'partial' | 'fail' | 'hang' | 'drop' | 'session-expired' */
-    sendBehavior: 'ok',
+    nextDraftNumber: 1,
+    /** 'ok' | 'fail' | 'hang' */
+    writeBehavior: 'ok',
   };
 
   const reply = (res, body, headers = {}) => {
@@ -127,23 +153,23 @@ export async function startMockKerio({ mails = makeMails(10), files = {}, userna
         return ok({ result, errors });
       }
 
-      case 'Mails.create': {
-        state.sent.push(params.mails[0]);
-        switch (state.sendBehavior) {
-          case 'ok':
-            return ok({ errors: [], result: [{ inputIndex: 0 }] });
-          case 'partial':
-            return ok({ errors: [{ inputIndex: 0, code: 'ErrorCodePartialSuccess', message: 'Partial success: the message was sent but could not be saved to Sent Items' }], result: [] });
-          case 'fail':
-            return ok({ errors: [{ inputIndex: 0, code: 'ErrorCodeSendingFailed', message: 'Sending failed' }], result: [] });
-          case 'hang':
-            return; // never answer
-          case 'drop':
-            return req.socket.destroy();
-          case 'session-expired':
-            return fail(-32001, 'Session expired.');
+      // Only drafts (send: false) are simulated; the client must never ask for anything else.
+      case 'Mails.create':
+      case 'Mails.set': {
+        if (state.writeBehavior === 'hang') return; // never answer
+        if (state.writeBehavior === 'fail') {
+          return ok({ errors: [{ inputIndex: 0, code: 'ErrorCodeSaveFailed', message: 'Saving failed' }], result: [] });
         }
-        return;
+        const [input] = params.mails;
+        if (method === 'Mails.create') {
+          const id = `keriostorage://mail/example.com/jan/drafts/${state.nextDraftNumber++}`;
+          state.mails.push(storedDraft(id, input));
+          return ok({ errors: [], result: [{ inputIndex: 0, id }] });
+        }
+        const index = state.mails.findIndex((mail) => mail.id === input.id);
+        if (index === -1) return ok({ errors: [{ inputIndex: 0, code: -32602, message: 'Item not found' }], result: [] });
+        state.mails[index] = storedDraft(input.id, input);
+        return ok({ errors: [], result: [{ inputIndex: 0, id: '' }] });
       }
 
       default:

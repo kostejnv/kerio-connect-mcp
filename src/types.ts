@@ -48,6 +48,12 @@ export interface KerioAttachment {
   size?: number;
 }
 
+/** A MIME header Kerio exposes, e.g. mhMessageID or mhInReplayTo (sic, Kerio's spelling). */
+export interface MailHeader {
+  type: string;
+  value: string;
+}
+
 export interface KerioMail {
   id: string;
   folderId?: string;
@@ -67,6 +73,7 @@ export interface KerioMail {
   size?: number;
   displayableParts?: DisplayablePart[];
   attachments?: KerioAttachment[];
+  headers?: MailHeader[];
 }
 
 export interface SearchCondition {
@@ -91,7 +98,8 @@ export interface MailsGetByIdResult {
   errors: KerioError[];
 }
 
-export interface MailsCreateResult {
+/** Result of Mails.create and Mails.set. */
+export interface MailsWriteResult {
   result: Array<{ id?: string; inputIndex?: number }>;
   errors: KerioError[];
 }

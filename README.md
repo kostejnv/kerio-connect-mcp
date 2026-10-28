@@ -3,9 +3,10 @@
 An [MCP](https://modelcontextprotocol.io) server that connects AI assistants (Claude, ChatGPT, Claude Code, …) to a
 **Kerio Connect** mailbox.
 
-- **Read-only by default:** list folders, search the whole history, read complete messages, read attachments and get
-  download links for them. Reading never marks messages as read or changes them.
-- **Sending is opt-in:** off unless the server operator enables it and the user opts in per connection.
+- **Reading:** list folders, search the whole history, read complete messages, read attachments and get download links
+  for them. Reading never marks messages as read or changes them.
+- **Drafts, never sending:** the assistant prepares e-mails and replies as drafts in the Drafts folder; the user reviews
+  and sends them from Kerio Webmail. The server has no way to send e-mail.
 - **Remote or local:** a hosted endpoint with OAuth sign-in (users enter their own Kerio server, username and password;
   nothing is stored on the server), or a local stdio process for one mailbox.
 - **Direct Kerio API:** talks to the Kerio client JSON-RPC API (`/webmail/api/jsonrpc`). No IMAP, no Outlook, no forwarding.
@@ -22,7 +23,8 @@ reworked for reliable reading and remote use.
 | `mail_get` | Read one message by ID (any age), full text in parts with `COMPLETE` / `PARTIAL` status, numbered attachments |
 | `mail_get_attachment` | Read an attachment: text from PDF, DOCX, XLSX/XLS/ODS, CSV, text, HTML, ICS, EML; images as images |
 | `mail_attachment_link` | Download links for attachments in their original format, one per file plus one ZIP (remote mode, 10 minutes) |
-| `mail_send` | Send a plain-text message (To, Cc, Bcc) — only on connections with sending enabled |
+| `mail_create_draft` | Save a new e-mail or a reply (`replyToId`, `replyAll`: recipients, `RE:` subject, quoted original, In-Reply-To) as a draft; text in a small Markdown subset; attachments only from e-mails already in the mailbox, new files as links in the text |
+| `mail_update_draft` | Change recipients, subject, text or attachments of a draft; only messages in the Drafts folder |
 
 Details and response formats: [docs/tools.md](docs/tools.md). Opening the server address in a browser shows a landing
 page with the same information for people.
@@ -40,19 +42,6 @@ Hosted instance: `https://kerio.kostejnv.cz/mcp`.
 A sign-in page opens (English, Czech switch at the top). Enter your Kerio server (e.g. `mail.example.com`), username and
 password. Use a regular account, not an administrator.
 
-### Read-only (default)
-
-Leave **Allow sending e-mails** unchecked (or the option is not shown at all when the server does not allow sending).
-The assistant can only read.
-
-### Enabling sending
-
-1. The operator sets `KERIO_ALLOW_SEND=true` on the server ([deployment](docs/deployment.md#operations)).
-2. You connect with **Allow sending e-mails** checked. Other connections stay read-only.
-
-The assistant cannot change this itself. Sending is never retried automatically; unclear results are reported as
-`RESULT UNKNOWN` so nothing is sent twice.
-
 ### Local stdio (one mailbox)
 
 ```json
@@ -64,23 +53,21 @@ The assistant cannot change this itself. Sending is never retried automatically;
       "env": {
         "KERIO_SERVER": "mail.example.com",
         "KERIO_USERNAME": "user@example.com",
-        "KERIO_PASSWORD": "…",
-        "KERIO_ENABLE_SEND": "false"
+        "KERIO_PASSWORD": "…"
       }
     }
   }
 }
 ```
 
-Build first with `npm install && npm run build`. `KERIO_ENABLE_SEND=true` enables sending in stdio mode; any value other
-than exactly `true` or `false` stops the server from starting.
+Build first with `npm install && npm run build`.
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
 | [Tools](docs/tools.md) | Arguments, response formats, completeness and continuation |
-| [Security](docs/security.md) | Read-only enforcement, sending safeguards, tokens and credentials, network policy |
+| [Security](docs/security.md) | Read-only reading, drafts-only writing, tokens and credentials, network policy |
 | [Architecture](docs/architecture.md) | Components, sign-in and request flows, stateless design, Kerio API usage |
 | [Deployment](docs/deployment.md) | Docker and reverse proxy setup, configuration, operations, troubleshooting |
 | [Development](docs/development.md) | Local setup, tests and the Kerio API mock, extending the server |

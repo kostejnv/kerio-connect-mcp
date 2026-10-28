@@ -20,10 +20,9 @@ export const REFRESH_TOKEN_TTL_SECONDS = 90 * 24 * 60 * 60;
 const AUTH_REQUEST_TTL_SECONDS = 15 * 60;
 const CODE_TTL_SECONDS = 5 * 60;
 
-/** What a signed-in connection may do. Carried inside codes and tokens. */
+/** The signed-in connection. Carried inside codes and tokens. */
 export interface Grant {
   credentials: KerioCredentials;
-  sendEnabled: boolean;
 }
 
 export interface PendingAuthorization {

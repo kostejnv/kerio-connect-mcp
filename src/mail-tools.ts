@@ -1,12 +1,13 @@
 /**
- * MCP tools for reading (and optionally sending) Kerio Connect mail.
+ * MCP tools for reading Kerio Connect mail and preparing drafts.
  *
  * Read tools never call API methods that change mails: listing, searching, reading and
  * downloading attachments leave seen state, flags and folders untouched.
+ * Draft tools only save or change drafts in the Drafts folder; nothing is ever sent.
  */
 
 import { z } from 'zod';
-import { AttachmentTooLargeError, type KerioClient, type SendOutcome } from './client.js';
+import { AttachmentTooLargeError, type DraftMail, type KerioClient } from './client.js';
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_IMAGE_BYTES,
@@ -16,6 +17,7 @@ import {
   imageMimeType,
 } from './attachment-text.js';
 import { htmlToText } from './html-to-text.js';
+import { QUOTE_STYLE, escapeHtml, markdownToHtml, plainTextToHtml } from './markdown-to-html.js';
 import type { DisplayablePart, EmailAddress, KerioAttachment, KerioFolder, KerioMail, SearchCondition } from './types.js';
 
 const SEARCH_PAGE_SIZE = 200;
@@ -105,12 +107,53 @@ export const MailAttachmentLinkSchema = z.object({
     .describe('Attachment numbers as listed by mail_get. Omit for all attachments except inline images (e.g. signature logos).'),
 });
 
-export const MailSendSchema = z.object({
-  to: z.array(z.email()).min(1).describe('Recipient e-mail addresses.'),
-  cc: z.array(z.email()).optional().describe('Cc e-mail addresses.'),
-  bcc: z.array(z.email()).optional().describe('Bcc e-mail addresses.'),
-  subject: z.string().describe('Subject line.'),
-  body: z.string().min(1).describe('Plain-text message body.'),
+const DRAFT_BODY_FORMAT =
+  'E-mail text in plain text with a small Markdown subset, converted to HTML by the server: ' +
+  'blank line = new paragraph; a single line break is kept; **bold**, *italic*; "- " bullets, "1. " numbered lists; ' +
+  '"> " quote; [text](https://...) links (https, http, mailto only); bare URLs become links. ' +
+  'Not supported (shown as plain text): headings, tables, images, code blocks, HTML tags. ' +
+  'New files cannot be attached: put a link in the text (Google Drive recommended) and make sure the recipient can open it ' +
+  '(shared with them or "anyone with the link"); if you cannot check this, ask the user.';
+
+const AttachmentReferenceSchema = z.object({
+  fromMail: z.string().min(1)
+    .describe('ID of an e-mail in the mailbox that has the file as an attachment (from mail_search, or a draft ID).'),
+  attachment: z.number().int().min(1)
+    .describe('Attachment number as listed by mail_get for that e-mail (1 = first attachment).'),
+});
+
+const MAX_DRAFT_ATTACHMENTS = 20;
+
+export const MailCreateDraftSchema = z.object({
+  to: z.array(z.email()).min(1).optional()
+    .describe('Recipient addresses. Required unless replyToId is given; with replyToId they replace the reply recipients.'),
+  cc: z.array(z.email()).optional().describe('Cc addresses.'),
+  bcc: z.array(z.email()).optional().describe('Bcc addresses.'),
+  subject: z.string().optional()
+    .describe('Subject. Required unless replyToId is given (then "RE: <original subject>" by default).'),
+  body: z.string().min(1)
+    .describe(`${DRAFT_BODY_FORMAT} Write only your own text: when replying, the server appends the quoted original.`),
+  replyToId: z.string().min(1).optional()
+    .describe('Make the draft a reply to this e-mail (ID from mail_search): recipients, "RE:" subject, ' +
+      'the quoted original and threading (In-Reply-To) are filled in.'),
+  replyAll: z.boolean().optional().default(false)
+    .describe('With replyToId: also put everyone from the original To and Cc (except the mailbox owner) in Cc.'),
+  attachments: z.array(AttachmentReferenceSchema).max(MAX_DRAFT_ATTACHMENTS).optional()
+    .describe('Files that are already attachments of e-mails in the mailbox (e.g. a form or an invoice received earlier).'),
+});
+
+export const MailUpdateDraftSchema = z.object({
+  id: z.string().min(1)
+    .describe('Draft ID as returned by mail_create_draft (or a Drafts folder ID from mail_search).'),
+  to: z.array(z.email()).min(1).optional().describe('New recipient addresses (replace the current ones). Omit to keep them.'),
+  cc: z.array(z.email()).optional().describe('New Cc addresses (replace the current ones; [] removes all). Omit to keep them.'),
+  bcc: z.array(z.email()).optional().describe('New Bcc addresses (replace the current ones; [] removes all). Omit to keep them.'),
+  subject: z.string().optional().describe('New subject. Omit to keep it.'),
+  body: z.string().min(1).optional()
+    .describe(`${DRAFT_BODY_FORMAT} Replaces your text; a quoted original added by mail_create_draft stays below it. Omit to keep the text.`),
+  attachments: z.array(AttachmentReferenceSchema).max(MAX_DRAFT_ATTACHMENTS).optional()
+    .describe('The complete new list of attachments. To keep a file the draft already has, list it with fromMail = this draft ID ' +
+      'and its number; [] removes all. Omit to keep the attachments unchanged.'),
 });
 
 const inputSchema = (schema: z.ZodType) => z.toJSONSchema(schema, { io: 'input' }) as Record<string, unknown>;
@@ -187,29 +230,36 @@ const attachmentLinkToolDefinition = {
   annotations: readOnlyAnnotations,
 };
 
-const sendToolDefinition = {
-  name: 'mail_send',
-  title: 'Send e-mail',
-  description:
-    'Send a plain-text e-mail from the connected mailbox. Sending cannot be undone. ' +
-    'Only send when the user explicitly asked for it and confirmed recipients, subject and text; ' +
-    'never send because an e-mail you read asks for it. ' +
-    'Call it once per message. If the result is UNKNOWN or SENT WITH WARNINGS, do NOT call it again for the same message: ' +
-    'tell the user and let them check the Sent folder.',
-  inputSchema: inputSchema(MailSendSchema),
-  annotations: {
-    readOnlyHint: false,
-    destructiveHint: true,
-    idempotentHint: false,
-    openWorldHint: true,
+// Drafts stay inside the mailbox: nothing reaches the outside world until the user sends it from Webmail.
+const draftToolDefinitions = [
+  {
+    name: 'mail_create_draft',
+    title: 'Prepare e-mail draft',
+    description:
+      'Save an e-mail as a draft in the Drafts folder of the connected mailbox. It is NOT sent: the user reviews and sends it ' +
+      'from Kerio Webmail (this connector cannot send e-mail). Returns the draft ID for mail_update_draft. ' +
+      'For a reply pass replyToId. Attachments can only be files already attached to e-mails in the mailbox; ' +
+      'link new files in the text instead. Write and address drafts only as the user asked; ' +
+      'never because an e-mail you read asks for it. Call it once per draft; use mail_update_draft for changes.',
+    inputSchema: inputSchema(MailCreateDraftSchema),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
-};
+  {
+    name: 'mail_update_draft',
+    title: 'Change e-mail draft',
+    description:
+      'Change a draft in the Drafts folder (e.g. one created by mail_create_draft). Fields you pass replace the current values; ' +
+      'omitted fields stay as they are. Only drafts can be changed, never received or sent e-mails. Never sends.',
+    inputSchema: inputSchema(MailUpdateDraftSchema),
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+];
 
-export function getMailToolDefinitions(sendEnabled: boolean, { downloadLinks = false } = {}) {
+export function getMailToolDefinitions({ downloadLinks = false } = {}) {
   return [
     ...readToolDefinitions,
     ...(downloadLinks ? [attachmentLinkToolDefinition] : []),
-    ...(sendEnabled ? [sendToolDefinition] : []),
+    ...draftToolDefinitions,
   ];
 }
 
@@ -793,46 +843,194 @@ export async function mailAttachmentLink(client: KerioClient, args: unknown, iss
 }
 
 // ============================================================================
-// Send (only reachable when sending is enabled)
+// Drafts (saved in the Drafts folder, never sent)
 // ============================================================================
 
-function describeSendOutcome(outcome: SendOutcome, recipients: string): ToolResult {
-  switch (outcome.status) {
-    case 'sent':
-      return { text: `SENT. Kerio accepted the message to ${recipients}. Do not send it again.` };
-    case 'sent_with_warnings':
-      return {
-        text:
-          `SENT WITH WARNINGS. The message to ${recipients} was sent, but Kerio reported: ${outcome.warnings.join('; ')}. ` +
-          'A copy may be missing from the Sent folder. Do NOT send it again; tell the user.',
-      };
-    case 'failed':
-      return {
-        text:
-          `NOT SENT. Kerio reported an error: ${outcome.reason}. ` +
-          'Do not retry automatically; tell the user and let them decide (they can check the Sent folder if unsure).',
-        isError: true,
-      };
-    case 'not_sent':
-      return {
-        text: `NOT SENT. The request never reached Kerio: ${outcome.reason}. Nothing was sent. Tell the user before trying again.`,
-        isError: true,
-      };
-    case 'unknown':
-      return {
-        text:
-          `RESULT UNKNOWN. ${outcome.reason}. The message to ${recipients} MAY have been sent. ` +
-          'Do NOT send it again. Ask the user to check the Sent folder or with the recipients.',
-        isError: true,
-      };
-  }
+/** Wraps the quoted original, so a later change of the text keeps it. */
+const QUOTE_START = '<div class="kerio-mcp-quote">';
+
+type AttachmentReference = z.output<typeof AttachmentReferenceSchema>;
+
+function headerValue(mail: KerioMail, type: string): string | undefined {
+  return mail.headers?.find((header) => header.type === type)?.value;
 }
 
-export async function mailSend(client: KerioClient, args: unknown): Promise<ToolResult> {
-  if (!client.sendEnabled) {
-    return { text: 'ERROR: Sending e-mail is disabled for this connection. Nothing was sent.', isError: true };
-  }
-  const params = MailSendSchema.parse(args);
-  const outcome = await client.sendMail(params);
-  return describeSendOutcome(outcome, params.to.join(', '));
+function toAddresses(list: string[] | undefined): EmailAddress[] {
+  return (list ?? []).map((address) => ({ address, name: '' }));
 }
+
+/** Without empty entries, duplicates and the excluded addresses; the first occurrence wins. */
+function uniqueAddresses(list: EmailAddress[], exclude: string[] = []): EmailAddress[] {
+  const seen = new Set(exclude.map((address) => address.toLowerCase()));
+  return list.filter((entry) => {
+    const key = entry.address?.toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/** A reply to one's own sent mail goes to its recipients; any other reply goes to the sender (or Reply-To). */
+function replyRecipients(original: KerioMail, mailbox: Mailbox): EmailAddress[] {
+  if (directionOf(original, mailbox) === 'outgoing') return original.to ?? [];
+  if (original.replyTo?.length) return original.replyTo;
+  return original.from ? [original.from] : [];
+}
+
+function replySubject(subject: string | undefined): string {
+  const text = subject ?? '';
+  return /^\s*(re|odp|aw|sv)\s*:/i.test(text) ? text : `RE: ${text}`;
+}
+
+/** "24. 10. 2026 18:25", in the time zone Kerio reports. */
+function quoteDate(value: string | undefined): string {
+  const parts = value?.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/);
+  return parts ? `${Number(parts[3])}. ${Number(parts[2])}. ${parts[1]} ${parts[4]}:${parts[5]}` : formatDate(value);
+}
+
+function quotedOriginal(original: KerioMail): string {
+  const attribution = `${quoteDate(original.receiveDate ?? original.sendDate)}, ${formatAddress(original.from)}:`;
+  const text = mailBodyText(original.displayableParts ?? []);
+  return `${QUOTE_START}<br>${escapeHtml(attribution)}<blockquote style="${QUOTE_STYLE}">${plainTextToHtml(text)}</blockquote></div>`;
+}
+
+function draftHtml(body: string, quote: string): string {
+  return `<html><body>${markdownToHtml(body)}${quote}</body></html>`;
+}
+
+function currentHtml(draft: KerioMail): string {
+  const parts = draft.displayableParts ?? [];
+  const html = parts.find((part) => part.contentType === 'ctTextHtml');
+  if (html) return html.content;
+  const plain = parts.find((part) => part.contentType === 'ctTextPlain');
+  return `<html><body>${plainTextToHtml(plain?.content ?? '')}</body></html>`;
+}
+
+function quoteIn(html: string): string {
+  const start = html.indexOf(QUOTE_START);
+  return start === -1 ? '' : html.slice(start).replace(/<\/body>\s*<\/html>\s*$/i, '');
+}
+
+/** Looks up the referenced attachments; Kerio copies them into the draft by their IDs. */
+async function resolveAttachments(
+  client: KerioClient,
+  references: AttachmentReference[]
+): Promise<{ attachments: KerioAttachment[] } | { error: ToolResult }> {
+  if (references.length === 0) return { attachments: [] };
+
+  const { result } = await client.getMailsById([...new Set(references.map((reference) => reference.fromMail))]);
+  const attachments: KerioAttachment[] = [];
+  for (const { fromMail, attachment } of references) {
+    const mail = result.find((item) => item.id === fromMail);
+    if (!mail) {
+      return { error: { text: `ERROR: Message not found: ${fromMail}. Nothing was saved.`, isError: true } };
+    }
+    const found = mail.attachments?.[attachment - 1];
+    if (!found?.id) {
+      return {
+        error: {
+          text: `ERROR: Message ${fromMail} has ${mail.attachments?.length ?? 0} attachment(s); there is no attachment ${attachment}. Nothing was saved.`,
+          isError: true,
+        },
+      };
+    }
+    attachments.push(found);
+  }
+  return { attachments };
+}
+
+function describeDraft(heading: string, id: string, draft: DraftMail, note?: string): ToolResult {
+  const lines = [
+    heading,
+    `ID: ${id}`,
+    `To: ${formatAddresses(draft.to)}`,
+    draft.cc.length > 0 ? `Cc: ${formatAddresses(draft.cc)}` : null,
+    draft.bcc.length > 0 ? `Bcc: ${formatAddresses(draft.bcc)}` : null,
+    `Subject: ${draft.subject}`,
+    draft.attachments.length > 0 ? `Attachments: ${draft.attachments.map((a) => a.name || '(unnamed)').join(', ')}` : null,
+    note ?? null,
+    'It was NOT sent: the user reviews and sends it from Kerio Webmail (Drafts folder).',
+  ];
+  return { text: lines.filter(Boolean).join('\n') };
+}
+
+export async function mailCreateDraft(client: KerioClient, args: unknown): Promise<ToolResult> {
+  const params = MailCreateDraftSchema.parse(args);
+  const mailbox = await loadMailbox(client);
+
+  let original: KerioMail | undefined;
+  if (params.replyToId) {
+    const found = await findMail(client, params.replyToId);
+    if ('error' in found) return found.error;
+    original = found.mail;
+  }
+
+  const to = uniqueAddresses(params.to ? toAddresses(params.to) : original ? replyRecipients(original, mailbox) : []);
+  if (to.length === 0) {
+    return { text: 'ERROR: No recipient: give "to" (or "replyToId"). Nothing was saved.', isError: true };
+  }
+  const subject = params.subject ?? (original ? replySubject(original.subject) : undefined);
+  if (subject === undefined) {
+    return { text: 'ERROR: No subject: give "subject" (or "replyToId"). Nothing was saved.', isError: true };
+  }
+  const replyAllCc = original && params.replyAll
+    ? uniqueAddresses([...(original.to ?? []), ...(original.cc ?? [])], mailbox.owner ? [mailbox.owner] : [])
+    : [];
+  const cc = uniqueAddresses([...toAddresses(params.cc), ...replyAllCc], to.map((address) => address.address ?? ''));
+
+  const resolved = await resolveAttachments(client, params.attachments ?? []);
+  if ('error' in resolved) return resolved.error;
+
+  const messageId = original ? headerValue(original, 'mhMessageID') : undefined;
+  const draft: DraftMail = {
+    to,
+    cc,
+    bcc: uniqueAddresses(toAddresses(params.bcc)),
+    subject,
+    html: draftHtml(params.body, original ? quotedOriginal(original) : ''),
+    attachments: resolved.attachments,
+    inReplyTo: messageId,
+  };
+  const id = await client.createDraft(draft);
+
+  let note: string | undefined;
+  if (original) {
+    note = `Reply to "${original.subject ?? ''}"; the original is quoted below the text.` +
+      (messageId ? ' Threaded with In-Reply-To.' : ' Kerio reported no Message-ID for the original, so it may not be threaded.');
+  }
+  return describeDraft('Draft saved in the Drafts folder.', id, draft, note);
+}
+
+export async function mailUpdateDraft(client: KerioClient, args: unknown): Promise<ToolResult> {
+  const params = MailUpdateDraftSchema.parse(args);
+  const found = await findMail(client, params.id);
+  if ('error' in found) return found.error;
+  const current = found.mail;
+
+  const mailbox = await loadMailbox(client);
+  const folderRole = current.folderId ? mailbox.folderById.get(current.folderId)?.role : undefined;
+  if (folderRole !== 'drafts' || current.isDraft !== true) {
+    return { text: 'ERROR: This message is not a draft in the Drafts folder. Only drafts can be changed; nothing was changed.', isError: true };
+  }
+
+  let attachments = current.attachments ?? [];
+  if (params.attachments) {
+    const resolved = await resolveAttachments(client, params.attachments);
+    if ('error' in resolved) return resolved.error;
+    attachments = resolved.attachments;
+  }
+
+  const html = currentHtml(current);
+  const draft: DraftMail = {
+    to: params.to ? toAddresses(params.to) : current.to ?? [],
+    cc: params.cc ? toAddresses(params.cc) : current.cc ?? [],
+    bcc: params.bcc ? toAddresses(params.bcc) : current.bcc ?? [],
+    subject: params.subject ?? current.subject ?? '',
+    html: params.body === undefined ? html : draftHtml(params.body, quoteIn(html)),
+    attachments,
+    inReplyTo: headerValue(current, 'mhInReplayTo'),
+  };
+  await client.updateDraft(current.id, draft);
+  return describeDraft('Draft updated.', current.id, draft);
+}
+

@@ -37,8 +37,9 @@ The server has two transports:
 | `src/index.ts` | Entry point: loads configuration and starts the stdio or http transport |
 | `src/config.ts` | Environment parsing and validation (strict boolean switches, token key) |
 | `src/mcp-server.ts` | MCP server for one mailbox connection: tool list and tool dispatch |
-| `src/mail-tools.ts` | Tool schemas, descriptions, search/paging logic and response formatting |
-| `src/client.ts` | Kerio JSON-RPC client: method allowlist, session handling, retries, send outcome |
+| `src/mail-tools.ts` | Tool schemas, descriptions, search/paging logic, reply and draft assembly, response formatting |
+| `src/markdown-to-html.ts` | The Markdown subset for draft text, converted to escaped HTML |
+| `src/client.ts` | Kerio JSON-RPC client: method allowlist, session handling, retries, the draft-only write path |
 | `src/network.ts` | Outbound policy: https only, host allowlist, private address blocking, TLS trust |
 | `src/http-server.ts` | Express app: OAuth router, sign-in form handler, `/mcp`, `/healthz`, Kerio client pool |
 | `src/oauth-provider.ts` | Stateless OAuth provider: client registration, codes, access and refresh tokens |
@@ -68,7 +69,7 @@ sequenceDiagram
     C->>B: open /authorize?client_id&redirect_uri&code_challenge
     B->>S: GET /authorize
     S-->>B: sign-in page (sealed auth request in a hidden field)
-    B->>S: POST /login (server, username, password, [allowSend])
+    B->>S: POST /login (server, username, password)
     S->>K: Session.login
     K-->>S: session token + cookie
     S-->>B: 302 redirect_uri?code=sealed code&state
@@ -78,7 +79,7 @@ sequenceDiagram
 ```
 
 Credentials are checked against Kerio before any code is issued. The code, the access token and the refresh token each
-carry the credentials and the send permission, encrypted.
+carry the credentials, encrypted.
 
 ### Calling a tool
 
@@ -86,7 +87,7 @@ carry the credentials and the send permission, encrypted.
 2. The bearer middleware opens the token; invalid, foreign, tampered or expired tokens get `401` with a
    `WWW-Authenticate` header pointing to the OAuth metadata.
 3. The server takes the Kerio client for these credentials from the in-memory pool (or creates one) and builds an MCP
-   server whose tool list depends on the connection's send permission.
+   server for that mailbox.
 4. The tool calls Kerio. The Kerio session is reused across requests; if it expired, the client signs in again.
 
 The MCP endpoint is stateless (no MCP sessions): every request is self-contained, so restarts and multiple instances
@@ -118,7 +119,8 @@ Losing server memory (restart, deploy) only costs one extra Kerio sign-in on the
 | `Mails.get` | Search pages: `folderIds`, `start`, `limit`, order by `receiveDate` descending, optional `QUICKSEARCH` condition; returns `totalItems` |
 | `Mails.getById` | Reading one message: displayable parts (HTML plus a short plain preview) and attachments with their download URLs |
 | `GET <attachment url>` | Downloading an attachment (`/webmail/api/download/attachment/…`, session cookies and `X-Token`) |
-| `Mails.create` | Sending (only with sending enabled; one message with `send: true`) |
+| `Mails.create` | Saving a new draft: one message with `send: false`; Kerio puts it into Drafts and returns its ID. Attachments are referenced by their Kerio attachment IDs; `headers` carries `mhInReplayTo` (Kerio's spelling) for replies |
+| `Mails.set` | Changing a draft: the same fields plus its `id`, again with `send: false` |
 
 Reference: [Kerio Connect client API](https://manuals.gfi.com/en/kerio/api/connect/client/reference/index.html).
 Assumptions that are not documented by Kerio are listed in [Verification](verification.md).
