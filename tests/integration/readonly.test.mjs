@@ -1,5 +1,5 @@
 /**
- * Optional read-only check against a real Kerio Connect mailbox. Never sends e-mail.
+ * Optional read-only check against a real Kerio Connect mailbox. Never sends e-mail or saves drafts.
  *
  *   KERIO_SERVER=mail.example.com KERIO_USERNAME=... KERIO_PASSWORD=... npm run test:integration
  *
@@ -36,17 +36,16 @@ describe('real Kerio mailbox (read-only)', { skip: !enabled && 'set KERIO_INTEGR
       },
       network,
       dispatcher: createKerioDispatcher(network),
-      sendEnabled: false,
     });
     mcp = await connectMcp(client);
     const folders = await client.getMailFolders();
     inbox = folders.find((folder) => /^(inbox|doručená pošta)$/i.test(folder.name)) ?? folders[0];
   });
 
-  test('lists folders and offers no send tool', async () => {
+  test('lists folders, including Drafts, and offers no send tool', async () => {
     const { tools } = await mcp.listTools();
     assert.ok(!tools.some((tool) => tool.name === 'mail_send'));
-    assert.match(textOf(await mcp.callTool({ name: 'mail_folders_list', arguments: {} })), /mail folder\(s\)/);
+    assert.match(textOf(await mcp.callTool({ name: 'mail_folders_list', arguments: {} })), /\[drafts\]/);
   });
 
   test('reads the oldest inbox message by ID without changing its seen state', async () => {

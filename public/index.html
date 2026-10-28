@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kerio Connect MCP · Vít Koštejn</title>
-<meta name="description" content="Connect ChatGPT or Claude to a Kerio Connect mailbox: search and read mail, read and download attachments. Read-only by default.">
+<meta name="description" content="Connect ChatGPT or Claude to a Kerio Connect mailbox: search and read mail, read and download attachments, prepare drafts. It never sends e-mail.">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="icon" href="/assets/favicon.ico" sizes="any">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -55,7 +55,7 @@
   <!-- ===================================================== English -->
   <main data-lang="en">
     <h1>ChatGPT or Claude can search and read your Kerio Connect mail</h1>
-    <p>This server connects AI assistants to a Kerio Connect mailbox through the Model Context Protocol (MCP). Everyone signs in with their own Kerio account. The assistant can then find e-mails across the whole history, read them in full, read attachments and give you download links. Access is <span class="mk" data-mk="double">read-only by default</span>.</p>
+    <p>This server connects AI assistants to a Kerio Connect mailbox through the Model Context Protocol (MCP). Everyone signs in with their own Kerio account. The assistant can then find e-mails across the whole history, read them in full, read attachments, give you download links and prepare drafts for you to check. It <span class="mk" data-mk="double">never sends e-mail</span>: you send drafts yourself from Kerio Webmail.</p>
 
     <section>
       <div class="head"><h2><span class="no">01</span>How a question travels to your mailbox</h2></div>
@@ -88,7 +88,8 @@
           <tr><td class="tool"><span class="addr">mail_get</span></td><td>Reads one e-mail in full, with its list of attachments.</td></tr>
           <tr><td class="tool"><span class="addr">mail_get_attachment</span></td><td>Reads an attachment: text from PDF, Word, Excel, CSV and text files; images as images.</td></tr>
           <tr><td class="tool"><span class="addr">mail_attachment_link</span></td><td>Gives download links for attachments in their original format, one per file and one ZIP for all. Links work for 10 minutes.</td></tr>
-          <tr><td class="tool"><span class="addr">mail_send</span></td><td>Sends a plain-text e-mail. Only when this server allows sending and you ticked “Allow sending e-mails” when signing in.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_create_draft</span></td><td>Saves an e-mail or a reply as a draft in your Drafts folder, with attachments from e-mails you already have. New files go in as links.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_update_draft</span></td><td>Changes a draft: recipients, subject, text or attachments. Only drafts, never received or sent mail.</td></tr>
         </table>
       </div>
     </section>
@@ -99,7 +100,7 @@
         <table class="cells">
           <tr><td class="what">nothing is stored</td><td>Your password is only kept encrypted inside the key your assistant holds. The server has no database and no files with your data.</td></tr>
           <tr><td class="what">reading changes nothing</td><td>Messages are not marked as read, moved, flagged or deleted.</td></tr>
-          <tr><td class="what">sending needs two yeses</td><td>The server must allow it and you must tick it at sign-in. The assistant cannot switch it on, and it never sends a message twice on its own.</td></tr>
+          <tr><td class="what">you send, not the assistant</td><td>The assistant can only save drafts. You read them in Kerio Webmail and send or delete them yourself.</td></tr>
           <tr><td class="what">mail is untrusted</td><td>The assistant is told to treat e-mails and attachments as data and never to follow instructions written in them.</td></tr>
           <tr><td class="what">signing out</td><td>Remove the connector in your assistant. Without use, the key expires after 90 days.</td></tr>
         </table>
@@ -110,7 +111,7 @@
   <!-- ===================================================== Čeština -->
   <main data-lang="cs" hidden>
     <h1>ChatGPT nebo Claude prohledá a přečte vaši poštu v Kerio Connect</h1>
-    <p>Tento server propojuje AI asistenty se schránkou Kerio Connect přes Model Context Protocol (MCP). Každý se přihlásí svým vlastním účtem v Keriu. Asistent pak umí najít e-maily v celé historii, přečíst je celé, přečíst přílohy a dát vám odkazy ke stažení. Přístup je <span class="mk" data-mk="double">ve výchozím stavu jen pro čtení</span>.</p>
+    <p>Tento server propojuje AI asistenty se schránkou Kerio Connect přes Model Context Protocol (MCP). Každý se přihlásí svým vlastním účtem v Keriu. Asistent pak umí najít e-maily v celé historii, přečíst je celé, přečíst přílohy, dát vám odkazy ke stažení a připravit koncepty ke kontrole. <span class="mk" data-mk="double">Nikdy nic neodešle</span>: koncepty odesíláte sami z Kerio Webmailu.</p>
 
     <section>
       <div class="head"><h2><span class="no">01</span>Jak se dotaz dostane k vaší poště</h2></div>
@@ -143,7 +144,8 @@
           <tr><td class="tool"><span class="addr">mail_get</span></td><td>Přečte jeden e-mail celý, se seznamem příloh.</td></tr>
           <tr><td class="tool"><span class="addr">mail_get_attachment</span></td><td>Přečte přílohu: text z PDF, Wordu, Excelu, CSV a textových souborů; obrázky jako obrázky.</td></tr>
           <tr><td class="tool"><span class="addr">mail_attachment_link</span></td><td>Dá odkazy ke stažení příloh v původním formátu, na každý soubor zvlášť a jeden ZIP se všemi. Odkazy platí 10 minut.</td></tr>
-          <tr><td class="tool"><span class="addr">mail_send</span></td><td>Odešle e-mail jako prostý text. Jen pokud server odesílání povoluje a vy jste při přihlášení zaškrtli „Povolit odesílání e-mailů“.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_create_draft</span></td><td>Uloží e-mail nebo odpověď jako koncept do složky Koncepty, s přílohami z e-mailů, které už máte. Nové soubory vloží jako odkaz.</td></tr>
+          <tr><td class="tool"><span class="addr">mail_update_draft</span></td><td>Upraví koncept: příjemce, předmět, text nebo přílohy. Jen koncepty, nikdy přijatou ani odeslanou poštu.</td></tr>
         </table>
       </div>
     </section>
@@ -154,7 +156,7 @@
         <table class="cells">
           <tr><td class="what">nic se neukládá</td><td>Heslo je jen zašifrované v klíči, který drží váš asistent. Server nemá žádnou databázi ani soubory s vašimi údaji.</td></tr>
           <tr><td class="what">čtení nic nemění</td><td>Zprávy se neoznačí jako přečtené, nepřesunou, neoznačí příznakem ani nesmažou.</td></tr>
-          <tr><td class="what">odesílání chce dvě ano</td><td>Musí ho povolit server a vy ho musíte zaškrtnout při přihlášení. Asistent si ho sám zapnout nemůže a nikdy sám neodešle zprávu dvakrát.</td></tr>
+          <tr><td class="what">odesíláte vy, ne asistent</td><td>Asistent umí jen uložit koncept. Ten si přečtete v Kerio Webmailu a sami ho odešlete, nebo smažete.</td></tr>
           <tr><td class="what">pošta je nedůvěryhodná</td><td>Asistent má pokyn brát e-maily a přílohy jako data a nikdy neplnit pokyny, které jsou v nich napsané.</td></tr>
           <tr><td class="what">odhlášení</td><td>Odeberte connector ve svém asistentovi. Bez používání klíč po 90 dnech vyprší.</td></tr>
         </table>

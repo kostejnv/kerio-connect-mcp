@@ -43,6 +43,7 @@ describe('mail tools', () => {
     assert.match(text, /Mailbox owner: jan@example\.com/);
     assert.match(text, /- INBOX \[inbox\]\n/);
     assert.match(text, /- Sent Items \[sent\]\n/);
+    assert.match(text, /- Drafts \[drafts\]\n/);
     assert.match(text, /- INBOX\/Projects\n/);
     assert.doesNotMatch(text, /Calendar/);
   });
@@ -161,7 +162,6 @@ describe('mail tools', () => {
 
     assert.deepEqual(mock.nonReadCalls(), []);
     assert.equal(unread.isSeen, false);
-    assert.equal(mock.state.sent.length, 0);
   });
 
   test('accepts stringified arguments from weaker tool-calling models', async () => {
@@ -175,12 +175,15 @@ describe('mail tools', () => {
     assert.equal(text.match(/Dobrý den,/g).length, 1, 'preview must not be repeated');
   });
 
-  test('marks read tools as read-only', async () => {
+  test('marks read tools as read-only and draft tools as non-destructive writes', async () => {
     const { tools } = await mcp.listTools();
-    assert.deepEqual(tools.map((tool) => tool.name), ['mail_folders_list', 'mail_search', 'mail_get', 'mail_get_attachment']);
+    assert.deepEqual(tools.map((tool) => tool.name), [
+      'mail_folders_list', 'mail_search', 'mail_get', 'mail_get_attachment', 'mail_create_draft', 'mail_update_draft',
+    ]);
     for (const tool of tools) {
-      assert.equal(tool.annotations.readOnlyHint, true);
+      assert.equal(tool.annotations.readOnlyHint, !tool.name.endsWith('_draft'));
       assert.equal(tool.annotations.destructiveHint, false);
+      assert.equal(tool.annotations.openWorldHint, false);
     }
   });
 });

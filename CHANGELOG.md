@@ -3,6 +3,24 @@
 All notable changes to this project are documented in this file. The project
 follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-10-28
+
+### Added
+
+- `mail_create_draft`: saves a new e-mail or a reply as a draft in the Drafts
+  folder. Replies (`replyToId`, `replyAll`) get the recipients, a `RE:`
+  subject, the quoted original and `In-Reply-To`. Attachments are copied from
+  e-mails already in the mailbox; new files go into the text as links.
+- `mail_update_draft`: changes recipients, subject, text or attachments of a
+  draft; only messages in the Drafts folder.
+- Draft text in a small Markdown subset, converted to escaped HTML.
+
+### Removed
+
+- Sending e-mail: the `mail_send` tool, the "Allow sending e-mails" sign-in
+  option and the `KERIO_ALLOW_SEND` / `KERIO_ENABLE_SEND` settings. The user
+  sends drafts from Kerio Webmail. Existing tokens keep working.
+
 ## [0.4.0] - 2026-10-25
 
 ### Added

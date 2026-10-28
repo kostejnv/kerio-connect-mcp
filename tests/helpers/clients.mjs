@@ -9,13 +9,12 @@ export function testNetwork(overrides = {}) {
   return { extraCaPem: TEST_CA, allowedServers: [], allowPrivateNetwork: true, requestTimeoutMs: 2000, ...overrides };
 }
 
-export function makeClient(mock, { sendEnabled = false, network = {}, server = mock.url, password = mock.password } = {}) {
+export function makeClient(mock, { network = {}, server = mock.url, password = mock.password } = {}) {
   const config = testNetwork(network);
   return new KerioClient({
     credentials: { server, username: mock.username, password },
     network: config,
     dispatcher: createKerioDispatcher(config),
-    sendEnabled,
   });
 }
 

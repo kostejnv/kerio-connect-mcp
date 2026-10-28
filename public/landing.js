@@ -7,7 +7,7 @@ const FIGURE_TEXT = {
     people: "employees", server: ["Kerio connector", "checks who may see what"], mailboxes: "mailboxes",
     pairs: [["question", "answer"], ["what to look for", "matching e-mails"], ["mail request", "e-mails, attachments"]],
     notes: ["holds an encrypted key", "does not keep the password", "signed-in users only", "mail stays in the company"],
-    mark: "read only",
+    mark: "never sends",
     signIn: "sign-in, once every 90 days",
     steps: [["1 · add the connection", "in ChatGPT or Claude"], ["2 · mail login and password", "on the sign-in page"],
             ["3 · the server checks them", "with Kerio; a wrong password gets nowhere"], ["4 · the assistant gets a key", "encrypted, valid for that person only"]],
@@ -17,7 +17,7 @@ const FIGURE_TEXT = {
     people: "zaměstnanci", server: ["Kerio konektor", "hlídá, kdo co smí"], mailboxes: "schránky",
     pairs: [["otázka", "odpověď"], ["co hledám", "nalezené e-maily"], ["dotaz do pošty", "e-maily a přílohy"]],
     notes: ["drží šifrovaný klíč", "heslo si nepamatuje", "pustí jen přihlášeného", "pošta zůstává ve firmě"],
-    mark: "jen čtení",
+    mark: "nic neodešle",
     signIn: "přihlášení, jednou za 90 dní",
     steps: [["1 · přidat připojení", "v ChatGPT nebo Claude"], ["2 · jméno a heslo do pošty", "na přihlašovací stránce"],
             ["3 · server je ověří u Keria", "se špatným heslem to neprojde"], ["4 · asistent dostane klíč", "šifrovaný, platí jen pro toho člověka"]],
@@ -56,7 +56,7 @@ function drawFigure(fig, t) {
   note(940, 286, t.notes[2], { "text-anchor": "middle" });
   note(1080, 286, t.notes[3], { "text-anchor": "middle" });
 
-  // the one highlight: read-only access, the same idea as the marked phrase in the text
+  // the one highlight: nothing is sent, the same idea as the marked phrase in the text
   markLabel(label(fig, 817, 180, t.mark, { "text-anchor": "middle", "font-size": 13 }));
 
   label(fig, 60, 356, t.signIn, { "font-size": 13 });

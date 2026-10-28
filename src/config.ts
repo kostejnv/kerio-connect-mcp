@@ -47,14 +47,12 @@ const HttpEnvSchema = z.object({
   PUBLIC_URL: z.string().url('PUBLIC_URL must be the public https URL of this server'),
   PORT: z.coerce.number().int().positive().optional().default(3000),
   MCP_TOKEN_KEY: z.string().min(1, 'MCP_TOKEN_KEY is required (generate with: openssl rand -base64 32)'),
-  KERIO_ALLOW_SEND: strictBoolean('KERIO_ALLOW_SEND'),
 });
 
 const StdioEnvSchema = z.object({
   KERIO_SERVER: z.string().min(1, 'KERIO_SERVER is required'),
   KERIO_USERNAME: z.string().min(1, 'KERIO_USERNAME is required'),
   KERIO_PASSWORD: z.string().min(1, 'KERIO_PASSWORD is required'),
-  KERIO_ENABLE_SEND: strictBoolean('KERIO_ENABLE_SEND'),
 });
 
 export interface NetworkConfig {
@@ -73,15 +71,12 @@ export interface HttpConfig {
   publicUrl: URL;
   port: number;
   tokenKey: Buffer;
-  /** Master switch: when false, no connection can enable sending. */
-  allowSend: boolean;
 }
 
 export interface StdioConfig {
   transport: 'stdio';
   network: NetworkConfig;
   credentials: { server: string; username: string; password: string };
-  sendEnabled: boolean;
 }
 
 export type AppConfig = HttpConfig | StdioConfig;
@@ -120,7 +115,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       publicUrl: new URL(http.PUBLIC_URL),
       port: http.PORT,
       tokenKey: parseTokenKey(http.MCP_TOKEN_KEY),
-      allowSend: http.KERIO_ALLOW_SEND,
     };
   }
 
@@ -133,6 +127,5 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       username: stdio.KERIO_USERNAME,
       password: stdio.KERIO_PASSWORD,
     },
-    sendEnabled: stdio.KERIO_ENABLE_SEND,
   };
 }

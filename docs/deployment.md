@@ -18,7 +18,7 @@ cd /root/kerio-mcp
 cp .env.example .env
 chmod 600 .env
 openssl rand -base64 32   # put the output into MCP_TOKEN_KEY
-# edit .env: PUBLIC_URL=https://kerio.example.com, KERIO_ALLOW_SEND=false
+# edit .env: PUBLIC_URL=https://kerio.example.com
 
 docker network create shared_net   # once, if it does not exist yet
 docker compose up -d --build
@@ -65,7 +65,6 @@ Then connect a client (see [README](../README.md#connecting-a-client)).
 | `PUBLIC_URL` | — | Public https URL; used as OAuth issuer and MCP resource (`<PUBLIC_URL>/mcp`) |
 | `PORT` | `3000` | Port inside the container |
 | `MCP_TOKEN_KEY` | — | 32 random bytes, base64 |
-| `KERIO_ALLOW_SEND` | `false` | `true` offers sending as a per-connection opt-in on the sign-in page |
 | `KERIO_ALLOWED_SERVERS` | empty | Comma-separated Kerio host names users may connect to; empty = any public host |
 | `KERIO_CA_FILE` | — | Path inside the container to a PEM company CA or self-signed Kerio certificate, e.g. `/app/certs/kerio.pem` (see below) |
 | `KERIO_REQUEST_TIMEOUT_MS` | `30000` | Timeout for requests to Kerio |
@@ -100,14 +99,12 @@ renewed, repeat the steps.
 | Update to the latest version | `git pull && docker compose up -d --build` |
 | Logs | `docker logs -f kerio-mcp` |
 | Restart | `docker compose restart` |
-| Enable the sending option | set `KERIO_ALLOW_SEND=true`, then `docker compose up -d` |
-| Disable sending for everyone | set `KERIO_ALLOW_SEND=false`, then `docker compose up -d`; applies immediately, also to connections that opted in earlier |
 | Sign out every connection | replace `MCP_TOKEN_KEY` with a new random value, then `docker compose up -d` |
 | Roll back | `git checkout <previous commit> && docker compose up -d --build` |
 | Free disk space after updates | `docker image prune -f` |
 
-A connection can send only while **both** hold: the user opted in at sign-in (sealed into its tokens) and the server has
-`KERIO_ALLOW_SEND=true`. Re-enabling the master switch restores sending only for connections that opted in.
+The server cannot send e-mail; it only saves drafts (see [Security](security.md#drafts)). A `KERIO_ALLOW_SEND` left in an
+older `.env` is ignored.
 
 The container runs as the unprivileged `node` user with a read-only file system, no Linux capabilities and
 `no-new-privileges`. A health check calls `/healthz` every 30 seconds.

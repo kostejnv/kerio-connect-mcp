@@ -1,8 +1,7 @@
 # Tool reference
 
 The server exposes four read-only tools everywhere, a fifth read-only tool (`mail_attachment_link`) on the remote
-endpoint, and `mail_send` only on connections where sending was explicitly enabled (see
-[Security](security.md#sending)).
+endpoint, and two draft tools everywhere. There is no tool that sends e-mail (see [Security](security.md#drafts)).
 
 All tools return plain text designed to be read by an AI agent: every response states what was returned, whether it is
 complete, and how to continue.
@@ -14,7 +13,10 @@ complete, and how to continue.
 | [`mail_get`](#mail_get) | Read one message | true | false |
 | [`mail_get_attachment`](#mail_get_attachment) | Read an attachment's content | true | false |
 | [`mail_attachment_link`](#mail_attachment_link) | Download attachments as files (remote only) | true | false |
-| [`mail_send`](#mail_send) | Send a message (opt-in) | false | true |
+| [`mail_create_draft`](#mail_create_draft) | Save a new draft or reply | false | false |
+| [`mail_update_draft`](#mail_update_draft) | Change a draft | false | false |
+
+All tools have `openWorldHint: false`: drafts stay in the mailbox until the user sends them.
 
 Annotations help clients decide when to ask for confirmation. They are hints only; permissions are enforced by the
 server ([Security](security.md)).
@@ -231,27 +233,80 @@ with `curl`, so the content never passes through its context; ChatGPT and Claude
 
 ---
 
-## `mail_send`
+## `mail_create_draft`
 
-Available only when sending is enabled for the connection. Sends one plain-text message from the connected mailbox.
+Saves one new e-mail as a draft in the Drafts folder. It is never sent: the user reviews it and sends it from Kerio
+Webmail.
 
 | Argument | Type | Required | Description |
 |---|---|---|---|
-| `to` | array of e-mail addresses | yes | Recipients |
+| `to` | array of e-mail addresses | unless `replyToId` | Recipients; with `replyToId` they replace the reply recipients |
 | `cc` | array of e-mail addresses | no | Cc recipients |
 | `bcc` | array of e-mail addresses | no | Bcc recipients |
-| `subject` | string | yes | Subject line |
-| `body` | string | yes | Plain-text body |
+| `subject` | string | unless `replyToId` | Subject; with `replyToId` the default is `RE: <original subject>` |
+| `body` | string | yes | Text in the [Markdown subset](#draft-text) |
+| `replyToId` | string | no | Make the draft a reply to this message |
+| `replyAll` | boolean | no (`false`) | With `replyToId`: everyone from the original To and Cc except the mailbox owner goes to Cc |
+| `attachments` | array of `{ fromMail, attachment }` | no | Files that are already attachments of messages in the mailbox (up to 20) |
 
-Sending is never retried automatically. The response starts with one of:
+**Replies.** The reply goes to the original sender (or its Reply-To); a reply to the owner's own sent message goes to
+that message's recipients. An existing `RE:`, `Re:`, `Odp:`, `AW:` or `SV:` prefix is not repeated. Below the text the
+server adds the quoted original: `24. 10. 2026 18:25, Name <address>:` and the original text as an escaped plain-text
+quote. The draft gets `In-Reply-To` with the original Message-ID, so mail programs thread it. Kerio's API has no
+`References` header.
 
-| Result | Meaning | What the agent is told |
-|---|---|---|
-| `SENT.` | Kerio accepted the message. | Do not send it again. |
-| `SENT WITH WARNINGS.` | Sent, but Kerio reported a partial failure (for example no copy in Sent Items). | Do not send it again; tell the user. |
-| `NOT SENT. Kerio reported an error` | Kerio rejected the message. | Do not retry automatically; let the user decide. |
-| `NOT SENT. The request never reached Kerio` | Connection failed before the request was delivered. | Nothing was sent; tell the user before trying again. |
-| `RESULT UNKNOWN.` | Timeout or dropped connection after the request was sent. | It may have been sent; do not resend; ask the user to check the Sent folder. |
+**Attachments.** `fromMail` is the ID of any message (or draft) and `attachment` its number as listed by `mail_get`.
+Kerio copies the file into the draft by its attachment ID; the file is not downloaded or uploaded. New files cannot be
+attached: the agent is told to link them in the text (Google Drive recommended) and to make sure the recipient can open
+them, asking the user when it cannot check the sharing.
 
-When sending is disabled, the tool is not listed, and calling it anyway returns
-`ERROR: Sending e-mail is disabled for this connection. Nothing was sent.` without contacting Kerio.
+Response:
+
+```
+Draft saved in the Drafts folder.
+ID: keriostorage://mail/example.com/jan/<drafts>/7317
+To: Client <client@customer.example>
+Subject: RE: Question
+Attachments: form.pdf
+Reply to "Question"; the original is quoted below the text. Threaded with In-Reply-To.
+It was NOT sent: the user reviews and sends it from Kerio Webmail (Drafts folder).
+```
+
+The write is not repeated automatically: an expired session is renewed by a read first, and a timeout is reported as an
+error rather than retried, so a draft is never saved twice by the server. Missing recipients, a missing subject, an
+unknown message or attachment number are reported before anything is saved (`Nothing was saved.`).
+
+## `mail_update_draft`
+
+Changes a draft. Fields that are passed replace the current values; omitted fields stay as they are.
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `id` | string | yes | Draft ID from `mail_create_draft` or `mail_search` |
+| `to`, `cc`, `bcc` | array of e-mail addresses | no | New recipients (`[]` clears Cc or Bcc) |
+| `subject` | string | no | New subject |
+| `body` | string | no | New text; a quoted original added by `mail_create_draft` stays below it |
+| `attachments` | array of `{ fromMail, attachment }` | no | The complete new list; keep a current file with `fromMail` = the draft ID; `[]` removes all |
+
+Only messages in the Drafts folder that Kerio marks as drafts can be changed; anything else returns
+`ERROR: This message is not a draft in the Drafts folder. … nothing was changed.` without a write. The In-Reply-To
+header of a reply draft is kept.
+
+## Draft text
+
+`body` is plain text with a small Markdown subset. The server converts it to HTML and escapes everything else, so text
+the agent writes (possibly influenced by e-mails it read) cannot add markup, images or scripts.
+
+| Written | Result |
+|---|---|
+| blank line | new paragraph |
+| single line break | kept (`<br>`) |
+| `**bold**`, `*italic*` | bold, italic |
+| `- item` (or `* item`) | bullet list |
+| `1. item` | numbered list (keeps the starting number) |
+| `> text` | quote |
+| `[text](https://…)` | link; only `https`, `http` and `mailto` |
+| `https://…`, `mailto:…` | link; trailing punctuation stays outside |
+
+A link whose text looks like an address but points elsewhere shows its real target. Headings, tables, images, code
+blocks and HTML tags are not supported and appear as plain text.

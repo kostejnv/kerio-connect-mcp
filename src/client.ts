@@ -1,9 +1,9 @@
 /**
- * Kerio Connect client JSON-RPC API (/webmail/api/jsonrpc), limited to mail reading and,
- * when explicitly enabled, sending.
+ * Kerio Connect client JSON-RPC API (/webmail/api/jsonrpc), limited to mail reading and
+ * saving drafts. It cannot send e-mail.
  *
  * Every request goes through an allowlist of API methods. Read requests may be repeated once
- * after a session renewal or a network error; sending is never repeated automatically.
+ * after a session renewal or a network error; draft writes are never repeated automatically.
  */
 
 import { request, type Dispatcher } from 'undici';
@@ -11,14 +11,16 @@ import type { NetworkConfig } from './config.js';
 import { assertServerAllowed } from './network.js';
 import { PACKAGE_VERSION } from './version.js';
 import type {
+  EmailAddress,
   JsonRpcResponse,
+  KerioAttachment,
   KerioCredentials,
   KerioError,
   KerioFolder,
   KerioMail,
-  MailsCreateResult,
   MailsGetByIdResult,
   MailsGetResult,
+  MailsWriteResult,
   SearchCondition,
 } from './types.js';
 
@@ -26,8 +28,9 @@ import type {
 const READ_METHODS = new Set(['Folders.get', 'Mails.get', 'Mails.getById']);
 /** Attachments may only be downloaded from this path of the connected Kerio server. */
 const ATTACHMENT_PATH_PREFIX = '/webmail/api/download/attachment/';
-const SEND_METHOD = 'Mails.create';
-const OUTGOING_MAIL_FIELDS = new Set(['send', 'from', 'to', 'cc', 'bcc', 'subject', 'displayableParts']);
+/** Mails.create saves a new draft, Mails.set changes one; both only ever with send: false. */
+const DRAFT_METHODS = new Set(['Mails.create', 'Mails.set']);
+const DRAFT_FIELDS = new Set(['send', 'from', 'to', 'cc', 'bcc', 'subject', 'displayableParts', 'attachments', 'headers']);
 
 // Kerio reports an expired or invalid session with these JSON-RPC codes; HTTP 401 is treated the same way.
 const SESSION_ERROR_CODES = new Set([-32001, -32002, -32003]);
@@ -100,26 +103,22 @@ function toTransportError(error: unknown): KerioTransportError {
   );
 }
 
-export type SendOutcome =
-  | { status: 'sent' }
-  | { status: 'sent_with_warnings'; warnings: string[] }
-  | { status: 'failed'; reason: string }
-  | { status: 'not_sent'; reason: string }
-  | { status: 'unknown'; reason: string };
-
-export interface OutgoingMail {
-  to: string[];
-  cc?: string[];
-  bcc?: string[];
+export interface DraftMail {
+  to: EmailAddress[];
+  cc: EmailAddress[];
+  bcc: EmailAddress[];
   subject: string;
-  body: string;
+  html: string;
+  /** Attachments of mails already in the mailbox; Kerio copies them into the draft. */
+  attachments: KerioAttachment[];
+  /** Message-ID of the mail this draft replies to. */
+  inReplyTo?: string;
 }
 
 export interface KerioClientOptions {
   credentials: KerioCredentials;
   network: NetworkConfig;
   dispatcher: Dispatcher;
-  sendEnabled: boolean;
 }
 
 interface Session {
@@ -137,7 +136,6 @@ export class KerioClient {
   private readonly apiUrl: string;
   private readonly credentials: KerioCredentials;
   private readonly dispatcher: Dispatcher;
-  public readonly sendEnabled: boolean;
   private session: Session | null = null;
   private pendingLogin: Promise<Session> | null = null;
   private requestId = 1;
@@ -148,7 +146,6 @@ export class KerioClient {
     this.serverOrigin = new URL(options.credentials.server).origin;
     this.apiUrl = `${this.serverOrigin}/webmail/api/jsonrpc`;
     this.dispatcher = options.dispatcher;
-    this.sendEnabled = options.sendEnabled;
   }
 
   /** The login name; the mailbox address when the login is an e-mail address. */
@@ -211,57 +208,45 @@ export class KerioClient {
     }
   }
 
-  /**
-   * Sends one plain-text mail. Never retried: an unclear result is reported as "unknown".
-   */
-  public async sendMail(mail: OutgoingMail): Promise<SendOutcome> {
-    if (!this.sendEnabled) {
-      throw new KerioPolicyError('Sending e-mail is disabled for this connection.');
-    }
+  /** Saves a new draft in the Drafts folder and returns its ID. Never sends. */
+  public async createDraft(draft: DraftMail): Promise<string> {
+    const result = await this.writeDraft('Mails.create', this.draftFields(draft));
+    const id = result.result?.[0]?.id;
+    if (!id) throw new KerioApiError('Kerio did not return the ID of the saved draft');
+    return id;
+  }
 
-    const toAddresses = (list: string[] = []) => list.map((address) => ({ address, name: '' }));
-    const params = {
-      mails: [{
-        send: true,
-        ...(this.credentials.username.includes('@') ? { from: { address: this.credentials.username, name: '' } } : {}),
-        to: toAddresses(mail.to),
-        cc: toAddresses(mail.cc),
-        bcc: toAddresses(mail.bcc),
-        subject: mail.subject,
-        displayableParts: [{ contentType: 'ctTextPlain', content: mail.body }],
-      }],
+  /** Replaces the content of an existing draft. Never sends. */
+  public async updateDraft(id: string, draft: DraftMail): Promise<void> {
+    await this.writeDraft('Mails.set', { id, ...this.draftFields(draft) });
+  }
+
+  private draftFields(draft: DraftMail): Record<string, unknown> {
+    const addresses = (list: EmailAddress[]) => list.map(({ address, name }) => ({ address: address ?? '', name: name ?? '' }));
+    return {
+      send: false,
+      ...(this.credentials.username.includes('@') ? { from: { address: this.credentials.username, name: '' } } : {}),
+      to: addresses(draft.to),
+      cc: addresses(draft.cc),
+      bcc: addresses(draft.bcc),
+      subject: draft.subject,
+      displayableParts: [{ contentType: 'ctTextHtml', content: draft.html }],
+      attachments: draft.attachments.map(({ id, name, contentType, size }) => ({ id, name, contentType, size })),
+      ...(draft.inReplyTo ? { headers: [{ type: 'mhInReplayTo', value: draft.inReplyTo }] } : {}),
     };
+  }
 
-    // Renew an expired session with a harmless read first, so the send itself needs no retry.
+  /**
+   * Draft write: renews an expired session with a harmless read first, then writes once.
+   * Not repeated, so an unclear outcome never leaves two copies of a draft.
+   */
+  private async writeDraft(method: string, mail: Record<string, unknown>): Promise<MailsWriteResult> {
     await this.read('Folders.get', {});
-
-    let result: MailsCreateResult;
-    try {
-      result = await this.post<MailsCreateResult>(SEND_METHOD, params, this.session);
-    } catch (error) {
-      if (error instanceof KerioTransportError) {
-        return error.mayHaveReachedServer
-          ? { status: 'unknown', reason: error.message }
-          : { status: 'not_sent', reason: error.message };
-      }
-      if (error instanceof KerioSessionError) {
-        return { status: 'not_sent', reason: `Kerio session was not accepted: ${error.message}` };
-      }
-      if (error instanceof KerioApiError) {
-        return { status: 'failed', reason: error.message };
-      }
-      throw error;
+    const result = await this.post<MailsWriteResult>(method, { mails: [mail] }, this.session);
+    if ((result.errors ?? []).length > 0) {
+      throw new KerioApiError(`Kerio did not save the draft: ${describeErrors(result.errors)}`);
     }
-
-    const errors = result.errors ?? [];
-    if (errors.length === 0) {
-      return { status: 'sent' };
-    }
-    const partialSuccess = errors.some((error) => /partial/i.test(`${error.code ?? ''} ${error.message ?? ''}`));
-    if (partialSuccess) {
-      return { status: 'sent_with_warnings', warnings: errors.map((error) => error.message ?? String(error.code)) };
-    }
-    return { status: 'failed', reason: describeErrors(errors) };
+    return result;
   }
 
   /** Read request: allowlisted, repeated once after session renewal or a network error. */
@@ -373,8 +358,8 @@ export class KerioClient {
     session: Session | null,
     onHeaders?: (headers: Record<string, string | string[] | undefined>) => void
   ): Promise<T> {
-    if (method === SEND_METHOD) {
-      this.assertOutgoingMail(params);
+    if (DRAFT_METHODS.has(method)) {
+      assertDraftOnly(method, params);
     } else if (method !== 'Session.login' && !READ_METHODS.has(method)) {
       throw new KerioPolicyError(`Kerio API method ${method} is not allowed`);
     }
@@ -421,20 +406,22 @@ export class KerioClient {
     }
     return data.result;
   }
+}
 
-  /** Mails.create is only allowed for sending exactly one new mail, never for drafts or templates. */
-  private assertOutgoingMail(params: unknown): void {
-    if (!this.sendEnabled) {
-      throw new KerioPolicyError('Sending e-mail is disabled for this connection.');
-    }
-    const mails = (params as { mails?: unknown[] })?.mails;
-    const mail = Array.isArray(mails) && mails.length === 1 ? (mails[0] as Record<string, unknown>) : null;
-    const isPlainOutgoingMail =
-      mail !== null &&
-      mail.send === true &&
-      Object.keys(mail).every((key) => OUTGOING_MAIL_FIELDS.has(key));
-    if (!isPlainOutgoingMail) {
-      throw new KerioPolicyError('Mails.create is only allowed for sending a single new e-mail');
-    }
+/**
+ * Mails.create and Mails.set may only save exactly one draft: send must be false, and only draft
+ * content fields are allowed. Mails.set must name the draft; Mails.create must not.
+ */
+function assertDraftOnly(method: string, params: unknown): void {
+  const mails = (params as { mails?: unknown[] })?.mails;
+  const mail = Array.isArray(mails) && mails.length === 1 ? (mails[0] as Record<string, unknown>) : null;
+  const allowedKeys = method === 'Mails.set' ? new Set([...DRAFT_FIELDS, 'id']) : DRAFT_FIELDS;
+  const isDraft =
+    mail !== null &&
+    mail.send === false &&
+    (method === 'Mails.set') === (typeof mail.id === 'string' && mail.id !== '') &&
+    Object.keys(mail).every((key) => allowedKeys.has(key));
+  if (!isDraft) {
+    throw new KerioPolicyError(`${method} is only allowed for saving a single draft, never for sending`);
   }
 }

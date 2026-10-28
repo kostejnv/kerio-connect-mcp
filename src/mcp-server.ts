@@ -9,11 +9,12 @@ import type { KerioClient } from './client.js';
 import {
   getMailToolDefinitions,
   mailAttachmentLink,
+  mailCreateDraft,
   mailFoldersList,
   mailGet,
   mailGetAttachment,
   mailSearch,
-  mailSend,
+  mailUpdateDraft,
   type DownloadLinkIssuer,
   type ToolResult,
 } from './mail-tools.js';
@@ -38,19 +39,17 @@ async function callTool(client: KerioClient, name: string, args: Record<string, 
     case 'mail_attachment_link':
       if (!options.issueDownloadLink) return { text: `ERROR: Unknown tool: ${name}`, isError: true };
       return mailAttachmentLink(client, args, options.issueDownloadLink);
-    case 'mail_send':
-      // Not listed when sending is disabled; a direct call is refused before any request to Kerio.
-      if (!client.sendEnabled) {
-        return { text: 'ERROR: Sending e-mail is disabled for this connection. Nothing was sent.', isError: true };
-      }
-      return mailSend(client, args);
+    case 'mail_create_draft':
+      return mailCreateDraft(client, args);
+    case 'mail_update_draft':
+      return mailUpdateDraft(client, args);
     default:
       return { text: `ERROR: Unknown tool: ${name}`, isError: true };
   }
 }
 
 export function createMcpServer(client: KerioClient, options: McpServerOptions = {}): Server {
-  const toolDefinitions = getMailToolDefinitions(client.sendEnabled, { downloadLinks: Boolean(options.issueDownloadLink) });
+  const toolDefinitions = getMailToolDefinitions({ downloadLinks: Boolean(options.issueDownloadLink) });
   const server = new Server(
     { name: 'kerio-connect-mcp', version: PACKAGE_VERSION },
     { capabilities: { tools: {} } }

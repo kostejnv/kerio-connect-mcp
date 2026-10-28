@@ -59,8 +59,9 @@ used and that nothing changed.
 |---|---|
 | `tests/client.test.mjs` | `Mails.getById` for old messages, session renewal, login errors, method allowlist, TLS, network policy |
 | `tests/mail-tools.test.mjs` | Folder paths, exact paging, complete filtered scans, date ranges, full long bodies, read-only behaviour |
-| `tests/send.test.mjs` | Disabled sending (tool list, direct call, client layer, no side effects), enabled sending and all outcomes |
-| `tests/oauth-http.test.mjs` | Whole OAuth flow with PKCE, sign-in form, token refresh, send opt-in and master switch, remote `/mcp` |
+| `tests/drafts.test.mjs` | Drafts: new, reply, reply all, attachments, updates keeping quote and attachments, only drafts editable, no retries, client refuses anything but one draft |
+| `tests/markdown.test.mjs` | The Markdown subset for draft text, escaping, allowed link schemes, misleading link texts |
+| `tests/oauth-http.test.mjs` | Whole OAuth flow with PKCE, sign-in form, token refresh, no send tool, remote `/mcp` |
 | `tests/config.test.mjs` | Strict switches, token key validation, sealed token integrity |
 | `tests/tool-arguments.test.mjs` | Conversion of stringified tool arguments |
 | `tests/attachments.test.mjs` | Attachment text from PDF, DOCX, XLSX, text; images; size and URL limits |
@@ -70,7 +71,7 @@ Attachment fixtures (`tests/fixtures/sample.*`) are tiny generated files: a two-
 1×1 PNG.
 | `tests/integration/readonly.test.mjs` | Optional, read-only, real server; skipped unless `KERIO_INTEGRATION=1` |
 
-No test sends real e-mail. The integration test creates its client with sending disabled.
+No test sends e-mail; the connector cannot. The integration test only reads and saves no drafts.
 
 ## Changing the code
 
@@ -78,8 +79,9 @@ No test sends real e-mail. The integration test creates its client with sending 
 `callTool` in `src/mcp-server.ts`, and tests against the mock. If it needs a new Kerio method, it must be a method that
 does not change data; add it to `READ_METHODS` in `src/client.ts` and to the mock.
 
-**Never** add a method that changes mailbox data to `READ_METHODS`. Write operations need their own guarded path like
-`sendMail`, a server-level switch and tests proving the disabled state makes no request.
+**Never** add a method that changes mailbox data to `READ_METHODS`. The only write path is the draft path in
+`src/client.ts` (`DRAFT_METHODS`, `assertDraftOnly`), which accepts nothing but one draft with `send: false`. Do not add
+a way to send.
 
 **Tool descriptions** are read by the agent; keep them precise about completeness, continuation and untrusted content.
 

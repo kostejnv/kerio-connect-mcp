@@ -8,21 +8,18 @@ import { TokenSealer } from '../dist/sealed-token.js';
 const stdioEnv = { KERIO_SERVER: 'mail.example.com', KERIO_USERNAME: 'jan@example.com', KERIO_PASSWORD: 'secret' };
 const httpEnv = { MCP_TRANSPORT: 'http', PUBLIC_URL: 'https://kerio.example.com', MCP_TOKEN_KEY: crypto.randomBytes(32).toString('base64') };
 
-test('sending is disabled when the switch is missing or false', () => {
-  assert.equal(loadConfig(stdioEnv).sendEnabled, false);
-  assert.equal(loadConfig({ ...stdioEnv, KERIO_ENABLE_SEND: 'false' }).sendEnabled, false);
-  assert.equal(loadConfig(httpEnv).allowSend, false);
-});
-
-test('only the exact value "true" enables sending', () => {
-  assert.equal(loadConfig({ ...stdioEnv, KERIO_ENABLE_SEND: 'true' }).sendEnabled, true);
-  assert.equal(loadConfig({ ...httpEnv, KERIO_ALLOW_SEND: 'true' }).allowSend, true);
+test('switches are off when missing or false, and only the exact value "true" turns them on', () => {
+  assert.equal(loadConfig(stdioEnv).network.allowPrivateNetwork, false);
+  assert.equal(loadConfig({ ...stdioEnv, KERIO_ALLOW_PRIVATE_NETWORK: 'false' }).network.allowPrivateNetwork, false);
+  assert.equal(loadConfig({ ...httpEnv, KERIO_ALLOW_PRIVATE_NETWORK: 'true' }).network.allowPrivateNetwork, true);
 });
 
 test('invalid switch values stop startup instead of enabling anything', () => {
   for (const value of ['TRUE', 'yes', '1', 'on', ' true']) {
-    assert.throws(() => loadConfig({ ...stdioEnv, KERIO_ENABLE_SEND: value }), /KERIO_ENABLE_SEND must be "true" or "false"/);
-    assert.throws(() => loadConfig({ ...httpEnv, KERIO_ALLOW_SEND: value }), /KERIO_ALLOW_SEND must be "true" or "false"/);
+    assert.throws(
+      () => loadConfig({ ...stdioEnv, KERIO_ALLOW_PRIVATE_NETWORK: value }),
+      /KERIO_ALLOW_PRIVATE_NETWORK must be "true" or "false"/
+    );
   }
 });
 
