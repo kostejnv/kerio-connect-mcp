@@ -10,12 +10,14 @@ import crypto from 'node:crypto';
 const fixture = (name) => readFileSync(new URL(`../fixtures/${name}`, import.meta.url), 'utf8');
 
 export const TEST_CA = fixture('ca.pem');
-export const READ_METHODS = ['Session.login', 'Folders.get', 'Mails.get', 'Mails.getById', 'GET attachment'];
+export const READ_METHODS = ['Session.login', 'Folders.get', 'Mails.get', 'Mails.getById', 'Contacts.get', 'Contacts.getById', 'GET attachment'];
 
 export const INBOX = 'keriostorage://folder/example.com/jan/inbox';
 export const SENT = 'keriostorage://folder/example.com/jan/sent';
 export const DRAFTS = 'keriostorage://folder/example.com/jan/drafts';
+export const CONTACTS = 'keriostorage://folder/example.com/jan/contacts';
 export const FOLDERS = [
+  { id: CONTACTS, name: 'Contacts', type: 'FContact', subType: 'FSubContacts' },
   { id: 'keriostorage://folder/example.com/jan/root', name: 'Mailbox', type: 'FRoot' },
   { id: INBOX, name: 'INBOX', type: 'FMail', subType: 'FSubInbox', parentId: 'keriostorage://folder/example.com/jan/root' },
   { id: SENT, name: 'Sent Items', type: 'FMail', subType: 'FSubSentItems', parentId: 'keriostorage://folder/example.com/jan/root' },
@@ -83,9 +85,11 @@ function storedDraft(id, input) {
 /**
  * @param files map of attachment download path → Buffer, served at that path for valid sessions
  */
-export async function startMockKerio({ mails = makeMails(10), files = {}, username = 'jan@example.com', password = 'secret' } = {}) {
+export async function startMockKerio({ mails = makeMails(10), files = {}, username = 'jan@example.com', password = 'secret', contacts = [], folders = FOLDERS } = {}) {
   const state = {
     mails,
+    contacts,
+    folders,
     files,
     calls: [],
     sessions: new Set(),
@@ -122,7 +126,7 @@ export async function startMockKerio({ mails = makeMails(10), files = {}, userna
 
     switch (method) {
       case 'Folders.get':
-        return ok({ list: FOLDERS });
+        return ok({ list: state.folders });
 
       case 'Mails.get': {
         const { folderIds, query } = params;
@@ -153,7 +157,39 @@ export async function startMockKerio({ mails = makeMails(10), files = {}, userna
         return ok({ result, errors });
       }
 
-      // Only drafts (send: false) are simulated; the client must never ask for anything else.
+      case 'Contacts.get': {
+        const { folderIds, query } = params;
+        const contacts = state.contacts.filter((contact) => folderIds.includes(contact.folderId))
+          .sort((a, b) => a.id.localeCompare(b.id));
+        return ok({ list: contacts.slice(query.start, query.start + query.limit), totalItems: contacts.length });
+      }
+      case 'Contacts.getById': {
+        const result = [], errors = [];
+        params.ids.forEach((id, inputIndex) => {
+          const contact = state.contacts.find((item) => item.id === id);
+          if (contact) result.push(structuredClone(contact));
+          else errors.push({ inputIndex, code: -32602, message: 'Contact not found' });
+        });
+        return ok({ result, errors });
+      }
+      case 'Contacts.create':
+      case 'Contacts.set': {
+        if (state.writeBehavior === 'hang') return;
+        if (state.writeBehavior === 'fail') return ok({ result: [], errors: [{ inputIndex: 0, message: 'Permission denied' }] });
+        const [contact] = params.contacts;
+        if (method === 'Contacts.create') {
+          const id = `contact-${state.contacts.length + 1}`;
+          state.contacts.push({ ...contact, id });
+          return ok({ result: [{ id, inputIndex: 0 }], errors: [] });
+        }
+        const current = state.contacts.find((item) => item.id === contact.id);
+        if (!current) return ok({ result: [], errors: [{ inputIndex: 0, message: 'Contact not found' }] });
+        if (!state.ignoreContactUpdates) Object.assign(current, contact);
+        return ok({ result: [{ id: '', inputIndex: 0 }], errors: [] });
+      }
+
+      // Draft updates and read status use separate, restricted payload shapes.
+
       case 'Mails.create':
       case 'Mails.set': {
         if (state.writeBehavior === 'hang') return; // never answer
@@ -161,6 +197,12 @@ export async function startMockKerio({ mails = makeMails(10), files = {}, userna
           return ok({ errors: [{ inputIndex: 0, code: 'ErrorCodeSaveFailed', message: 'Saving failed' }], result: [] });
         }
         const [input] = params.mails;
+        if (method === 'Mails.set' && Object.keys(input).every((key) => ['id', 'isSeen'].includes(key))) {
+          const mail = state.mails.find((item) => item.id === input.id);
+          if (!mail) return ok({ result: [], errors: [{ inputIndex: 0, message: 'Item not found' }] });
+          if (!state.ignoreStatusUpdates) mail.isSeen = input.isSeen;
+          return ok({ errors: [], result: [{ inputIndex: 0, id: '' }] });
+        }
         if (method === 'Mails.create') {
           const id = `keriostorage://mail/example.com/jan/drafts/${state.nextDraftNumber++}`;
           state.mails.push(storedDraft(id, input));

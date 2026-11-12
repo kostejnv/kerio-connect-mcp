@@ -37,9 +37,11 @@ The server has two transports:
 | `src/index.ts` | Entry point: loads configuration and starts the stdio or http transport |
 | `src/config.ts` | Environment parsing and validation (strict boolean switches, token key) |
 | `src/mcp-server.ts` | MCP server for one mailbox connection: tool list and tool dispatch |
+| `src/contact-tools.ts` | Contact schemas, bounded search, field mapping and partial updates |
+| `src/read-status-tool.ts` | Explicit read/unread assignment with per-ID verified outcomes |
 | `src/mail-tools.ts` | Tool schemas, descriptions, search/paging logic, reply and draft assembly, response formatting |
 | `src/markdown-to-html.ts` | The Markdown subset for draft text, converted to escaped HTML |
-| `src/client.ts` | Kerio JSON-RPC client: method allowlist, session handling, retries, the draft-only write path |
+| `src/client.ts` | Kerio JSON-RPC client: method allowlist, session handling, retries, separate restricted draft, read-status and contact write paths |
 | `src/network.ts` | Outbound policy: https only, host allowlist, private address blocking, TLS trust |
 | `src/http-server.ts` | Express app: OAuth router, sign-in form handler, `/mcp`, `/healthz`, Kerio client pool |
 | `src/oauth-provider.ts` | Stateless OAuth provider: client registration, codes, access and refresh tokens |
@@ -124,3 +126,19 @@ Losing server memory (restart, deploy) only costs one extra Kerio sign-in on the
 
 Reference: [Kerio Connect client API](https://manuals.gfi.com/en/kerio/api/connect/client/reference/index.html).
 Assumptions that are not documented by Kerio are listed in [Verification](verification.md).
+
+### New contact and read-status paths
+
+- `Contacts.get` lists contact-folder records; local name/address/phone filtering
+  scans at most 5,000 records per tool call and returns a continuation offset.
+- `Contacts.getById` reads a complete contact. `Folders.get` discovers `FContact`
+  folders. Ordinary contact writes use `Contacts.create` / `Contacts.set`.
+- `Mails.set` has a separate capability for exactly `{id, isSeen}`; it cannot
+  accept draft or send fields. The tool verifies each write with `Mails.getById`.
+- Contact updates send the existing folder ID and changed fields only. They do
+  not perform a complete-record replacement or offer compare-and-swap semantics.
+- These writes never retry automatically; partial and unknown outcomes remain
+  visible to the agent. No processing ledger or last-review state is persisted.
+
+The mail status payload and contact patch/clear behavior still need a controlled
+real-server pilot; see [Verification](verification.md).

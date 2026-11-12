@@ -103,3 +103,18 @@ export interface MailsWriteResult {
   result: Array<{ id?: string; inputIndex?: number }>;
   errors: KerioError[];
 }
+
+/** Contact fields returned by Contacts.getById; unknown fields are kept on the server. */
+export interface KerioContact {
+  id: string;
+  folderId: string;
+  type?: string;
+  watermark?: string;
+  isGalContact?: boolean;
+  commonName?: string;
+  firstName?: string;
+  surName?: string;
+  emailAddresses?: Array<{ address: string; [key: string]: unknown }>;
+  phoneNumbers?: Array<{ number: string; [key: string]: unknown }>;
+  [key: string]: unknown;
+}

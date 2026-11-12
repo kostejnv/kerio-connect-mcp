@@ -24,7 +24,7 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
     const page = await response.text();
     assert.ok(page.includes(`${app.baseUrl}/mcp`), 'shows the MCP address of this server');
     assert.doesNotMatch(page, /%MCP_URL%|%HOST%/);
-    for (const tool of ['mail_search', 'mail_get', 'mail_get_attachment', 'mail_attachment_link', 'mail_create_draft', 'mail_update_draft']) {
+    for (const tool of ['mail_search', 'mail_get', 'mail_get_attachment', 'mail_attachment_link', 'mail_create_draft', 'mail_update_draft', 'mail_set_read_status', 'contacts_search', 'contacts_get', 'contacts_create', 'contacts_update']) {
       assert.ok(page.includes(tool), tool);
     }
     assert.doesNotMatch(page, /mail_send/);
@@ -81,6 +81,7 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((tool) => tool.name), [
       'mail_folders_list', 'mail_search', 'mail_get', 'mail_get_attachment', 'mail_attachment_link', 'mail_create_draft', 'mail_update_draft',
+      'mail_set_read_status', 'contacts_search', 'contacts_get', 'contacts_create', 'contacts_update',
     ]);
     const result = await client.callTool({ name: 'mail_search', arguments: { limit: 3 } });
     assert.match(textOf(result), /Showing results 1-3 of 10/);
@@ -109,7 +110,7 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
     assert.equal(refreshed.status, 200);
     const next = await refreshed.json();
     const client = await mcpClient(app, next.access_token);
-    assert.equal((await client.listTools()).tools.length, 7);
+    assert.equal((await client.listTools()).tools.length, 12);
     await client.close();
   });
 
@@ -134,6 +135,22 @@ describe('OAuth sign-in and remote MCP endpoint', () => {
     const [create] = mock.callsOf('Mails.create');
     assert.equal(create.params.mails[0].send, false);
     await client.close();
+  });
+
+  test('contacts and read status work through an authenticated remote connection', async () => {
+    const { tokens } = await signIn(app, mock);
+    const client = await mcpClient(app, tokens.access_token);
+    try {
+      const call = (name, args) => client.callTool({ name, arguments: args });
+      assert.match(textOf(await call('contacts_search', {})), /Contact folders/);
+      const created = await call('contacts_create', { firstName: 'Remote', lastName: 'Contact' });
+      assert.equal(created.isError, false, textOf(created));
+      const id = textOf(created).match(/Contact saved\. ID: (\S+)/)[1];
+      assert.equal((await call('contacts_update', { id, notes: 'From remote MCP' })).isError, false);
+      assert.match(textOf(await call('contacts_get', { id })), /From remote MCP/);
+      assert.equal((await call('mail_set_read_status', { ids: [mock.state.mails[0].id], read: false })).isError, false);
+      assert.equal(mock.state.mails[0].isSeen, false);
+    } finally { await client.close(); }
   });
 
   test('rejects plain http and private addresses typed into the sign-in form', async () => {

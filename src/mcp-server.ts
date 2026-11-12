@@ -20,6 +20,8 @@ import {
 } from './mail-tools.js';
 import { normalizeToolArguments } from './tool-arguments.js';
 import { PACKAGE_VERSION } from './version.js';
+import { contactsSearch, contactsGet, contactsCreate, contactsUpdate, getContactToolDefinitions } from './contact-tools.js';
+import { mailSetReadStatus, readStatusToolDefinition } from './read-status-tool.js';
 
 export interface McpServerOptions {
   /** Remote mode only: issues download links for mail_attachment_link. */
@@ -28,6 +30,16 @@ export interface McpServerOptions {
 
 async function callTool(client: KerioClient, name: string, args: Record<string, unknown>, options: McpServerOptions): Promise<ToolResult> {
   switch (name) {
+    case 'mail_set_read_status':
+      return mailSetReadStatus(client, args);
+    case 'contacts_search':
+      return contactsSearch(client, args);
+    case 'contacts_get':
+      return contactsGet(client, args);
+    case 'contacts_create':
+      return contactsCreate(client, args);
+    case 'contacts_update':
+      return contactsUpdate(client, args);
     case 'mail_folders_list':
       return mailFoldersList(client);
     case 'mail_search':
@@ -49,7 +61,11 @@ async function callTool(client: KerioClient, name: string, args: Record<string, 
 }
 
 export function createMcpServer(client: KerioClient, options: McpServerOptions = {}): Server {
-  const toolDefinitions = getMailToolDefinitions({ downloadLinks: Boolean(options.issueDownloadLink) });
+  const toolDefinitions = [
+    ...getMailToolDefinitions({ downloadLinks: Boolean(options.issueDownloadLink) }),
+    readStatusToolDefinition,
+    ...getContactToolDefinitions(),
+  ];
   const server = new Server(
     { name: 'kerio-connect-mcp', version: PACKAGE_VERSION },
     { capabilities: { tools: {} } }
