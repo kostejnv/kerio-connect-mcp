@@ -3,6 +3,21 @@
 All notable changes to this project are documented in this file. The project
 follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-11-12
+
+### Added
+
+- `mail_set_read_status`: explicitly set up to 100 selected messages read or unread,
+  deduplicate IDs and report verified outcomes per message. No content changes,
+  moving, spam flags or sending.
+- `contacts_search`, `contacts_get`, `contacts_create`, `contacts_update`: bounded
+  contact search by name, e-mail or phone, folder discovery, complete detail and
+  partial updates, including birthdays. Omitted fields are preserved; null clears
+  scalar fields and supplied lists replace the corresponding list.
+- Separate restricted write paths for contact data and mail read status; no
+  automatic write retries. New mutations still need real-server verification.
+- Agent workflow and controlled pilot instructions in `docs/triage-workflow.md`.
+
 ## [0.5.0] - 2026-10-28
 
 ### Added

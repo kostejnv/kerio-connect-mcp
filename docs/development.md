@@ -59,6 +59,7 @@ used and that nothing changed.
 |---|---|
 | `tests/client.test.mjs` | `Mails.getById` for old messages, session renewal, login errors, method allowlist, TLS, network policy |
 | `tests/mail-tools.test.mjs` | Folder paths, exact paging, complete filtered scans, date ranges, full long bodies, read-only behaviour |
+| `tests/contacts-read-status.test.mjs` | Contact reads/search/paging, field preservation, explicit clearing, restricted writes, read/unread assignment, partial failures and no write retries |
 | `tests/drafts.test.mjs` | Drafts: new, reply, reply all, attachments, updates keeping quote and attachments, only drafts editable, no retries, client refuses anything but one draft |
 | `tests/markdown.test.mjs` | The Markdown subset for draft text, escaping, allowed link schemes, misleading link texts |
 | `tests/oauth-http.test.mjs` | Whole OAuth flow with PKCE, sign-in form, token refresh, no send tool, remote `/mcp` |
@@ -79,9 +80,10 @@ No test sends e-mail; the connector cannot. The integration test only reads and 
 `callTool` in `src/mcp-server.ts`, and tests against the mock. If it needs a new Kerio method, it must be a method that
 does not change data; add it to `READ_METHODS` in `src/client.ts` and to the mock.
 
-**Never** add a method that changes mailbox data to `READ_METHODS`. The only write path is the draft path in
-`src/client.ts` (`DRAFT_METHODS`, `assertDraftOnly`), which accepts nothing but one draft with `send: false`. Do not add
-a way to send.
+**Never** add a method that changes mailbox data to `READ_METHODS`. Write paths in `src/client.ts` are separate: drafts (`DRAFT_METHODS`, `assertDraftOnly`),
+explicit read status (`STATUS_WRITE`) and supported contact mutations (`CONTACT_WRITE`).
+Never broaden the draft policy to allow status/contact writes. Keep each mutation
+capability private, validate exact payload fields, and do not add a way to send.
 
 **Tool descriptions** are read by the agent; keep them precise about completeness, continuation and untrusted content.
 

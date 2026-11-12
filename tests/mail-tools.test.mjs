@@ -175,14 +175,15 @@ describe('mail tools', () => {
     assert.equal(text.match(/Dobrý den,/g).length, 1, 'preview must not be repeated');
   });
 
-  test('marks read tools as read-only and draft tools as non-destructive writes', async () => {
+  test('marks read tools, drafts and explicit mutations accurately', async () => {
     const { tools } = await mcp.listTools();
     assert.deepEqual(tools.map((tool) => tool.name), [
       'mail_folders_list', 'mail_search', 'mail_get', 'mail_get_attachment', 'mail_create_draft', 'mail_update_draft',
+      'mail_set_read_status', 'contacts_search', 'contacts_get', 'contacts_create', 'contacts_update',
     ]);
     for (const tool of tools) {
-      assert.equal(tool.annotations.readOnlyHint, !tool.name.endsWith('_draft'));
-      assert.equal(tool.annotations.destructiveHint, false);
+      assert.equal(tool.annotations.readOnlyHint, !['mail_create_draft', 'mail_update_draft', 'mail_set_read_status', 'contacts_create', 'contacts_update'].includes(tool.name));
+      assert.equal(tool.annotations.destructiveHint, ['mail_set_read_status', 'contacts_update'].includes(tool.name));
       assert.equal(tool.annotations.openWorldHint, false);
     }
   });

@@ -4,8 +4,8 @@
 
 | Risk | Protection |
 |---|---|
-| Agent sends mail | Impossible: there is no send tool, and the client refuses every write except saving a draft with `send: false` (below) |
-| Agent changes or deletes mail | No tool for moving, flagging or deleting; only drafts in the Drafts folder can be changed |
+| Agent sends mail | Impossible: there is no send tool, and draft writes require `send: false`; separate write paths only permit read status or contact fields (below) |
+| Agent changes or deletes mail | No tool for moving or deleting; message content changes are limited to drafts. Selected messages can explicitly be marked read/unread |
 | Duplicate drafts after an error | Draft writes are never retried |
 | Prompt injection through e-mails | Bodies and attachment text are marked as untrusted data; tool descriptions forbid acting on instructions in them; draft text cannot contain HTML, and links can only be http(s) or mailto |
 | Hostile attachments | Parsed in an isolated worker (256 MB, 30 s), never executed; downloads only from the Kerio server's attachment path, 25 MB each |
@@ -19,8 +19,11 @@
 ## Allowed Kerio API methods
 
 The Kerio client accepts only these methods: `Session.login`, `Folders.get`, `Mails.get`, `Mails.getById` for reading,
-and `Mails.create` / `Mails.set` for drafts (below). Any other method is refused locally with an error before a request
-is made, even if code elsewhere tried to call it. Attachment downloads are plain `GET` requests to the URL Kerio reports
+plus `Contacts.get` / `Contacts.getById` for contacts. Draft writes use `Mails.create` / `Mails.set` (below).
+Separate unexported capabilities permit `Mails.set` for one `{id, isSeen}` only, and
+`Contacts.create` / `Contacts.set` for one ordinary contact with allowlisted fields.
+Any other method is refused locally before a request is made. These mutation methods
+are never admitted to the read allowlist. Attachment downloads are plain `GET` requests to the URL Kerio reports
 for an attachment; the client accepts only URLs on the connected server under `/webmail/api/download/attachment/`.
 Reading never changes a message.
 
@@ -36,10 +39,10 @@ server's origin. Anyone holding a link during its 10 minutes can download those 
 
 ## Drafts
 
-The connector cannot send e-mail. It can only save drafts, which the user reviews and sends from Kerio Webmail. There is
-no setting to change this.
+The connector cannot send e-mail. Outgoing messages are saved as drafts, which
+the user reviews and sends from Kerio Webmail. There is no setting to enable sending.
 
-- `Mails.create` and `Mails.set` are accepted only for exactly one message with `send: false` and the fields `from`,
+- In the draft path, `Mails.create` and `Mails.set` are accepted only for exactly one message with `send: false` and the fields `from`,
   `to`, `cc`, `bcc`, `subject`, `displayableParts`, `attachments`, `headers`. `Mails.set` must name the draft by `id`;
   `Mails.create` must not. Anything else, such as `send: true`, a `folderId` or flags, is refused before a request is
   made.
@@ -81,3 +84,23 @@ limit the credentials. Anyone holding the password can do everything the account
 ## Reporting a vulnerability
 
 Please report security issues privately to the repository owner instead of opening a public issue.
+
+## Explicit read status and contact writes
+
+The read-status path permits exactly one ID and boolean `isSeen` per API write;
+it cannot pass `send`, content, recipients, folders or any other flags. The public
+tool accepts up to 100 IDs, deduplicates them and verifies each after writing.
+Partial failures are reported per ID. No folder-wide read-status operation exists.
+
+Contact writes permit only the supported name/company/job, address/phone lists,
+birthday and notes fields in an accessible contact folder. Updates cannot change
+folder, contact type, GAL records or distribution lists. Unsupported and omitted
+fields are not sent. Supplied lists deliberately replace the whole list. The
+server enforces access rights; the connector does not grant extra permissions.
+
+All new writes are performed once, never retried automatically. Unknown results
+must be checked before retrying, especially creation. Contact data is untrusted
+and does not authorize actions. User confirmation and duplicate checking are
+agent instructions, not a server-side authorization protocol; annotations are
+hints, not a consent enforcement mechanism. See [Tools](tools.md) for semantics
+and [Verification](verification.md) for outstanding real-server checks.

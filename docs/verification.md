@@ -80,3 +80,28 @@ Use a regular (non-administrator) account.
 5. **Threading** (3): send a reply draft from Webmail to yourself and check that it is threaded.
 
 Record the results here, including the Kerio Connect version tested.
+
+## Contacts and explicit read status (0.6.0)
+
+Verified against the simulated API: five-tool discovery (local and remote), contact
+search and continuation after the scan budget, accented names and phone matching,
+complete contact reads, typed create payloads, partial updates preserving omitted
+and unsupported fields, explicit null/[] clearing, folder selection, invalid-input
+rejection, GAL/distribution-list refusal, session renewal, per-ID read/unread
+assignment, duplicate IDs, partial failures, restricted mutation capabilities and
+no automatic retries on failed/unknown writes.
+
+**Not verified on a real Kerio server:**
+
+- `Contacts.get` query/order behavior and `FContact` folder discovery.
+- `Contacts.create` / `Contacts.set` accepted payloads and permissions; especially
+  that omitted fields survive a patch and empty strings clear scalar/date fields.
+- Birthday round-trip and local Webmail display, including daylight-saving dates.
+- `Mails.set` with only `{id, isSeen}` on incoming messages. Public IDL exposes
+  `isSeen`, but its method description focuses on drafts; exact behavior must be
+  verified. Readback detects a silent ignored update, but the pilot must also
+  confirm other fields and folders remain unchanged. Do not substitute the
+  folder-wide `Mails.setAllSeen` operation.
+
+Run the controlled pilot in [triage-workflow.md](triage-workflow.md) before broad
+use. Existing read-only integration tests do not exercise these writes.

@@ -1,9 +1,9 @@
 /**
- * Kerio Connect client JSON-RPC API (/webmail/api/jsonrpc), limited to mail reading and
- * saving drafts. It cannot send e-mail.
+ * Kerio Connect client JSON-RPC API (/webmail/api/jsonrpc), limited to mail reading, drafts, explicit read status and
+ * supported contact operations. It cannot send e-mail.
  *
  * Every request goes through an allowlist of API methods. Read requests may be repeated once
- * after a session renewal or a network error; draft writes are never repeated automatically.
+ * after a session renewal or a network error; writes are never repeated automatically.
  */
 
 import { request, type Dispatcher } from 'undici';
@@ -18,6 +18,7 @@ import type {
   KerioError,
   KerioFolder,
   KerioMail,
+  KerioContact,
   MailsGetByIdResult,
   MailsGetResult,
   MailsWriteResult,
@@ -25,7 +26,14 @@ import type {
 } from './types.js';
 
 /** API methods the connector may call in read-only mode (besides Session.login). */
-const READ_METHODS = new Set(['Folders.get', 'Mails.get', 'Mails.getById']);
+const READ_METHODS = new Set(['Folders.get', 'Mails.get', 'Mails.getById', 'Contacts.get', 'Contacts.getById']);
+// Unexported capabilities keep these narrow write paths separate from draft writes.
+const STATUS_WRITE = Symbol('read status');
+const CONTACT_WRITE = Symbol('contact');
+const CONTACT_FIELDS = new Set([
+  'folderId', 'commonName', 'firstName', 'surName', 'companyName', 'profession',
+  'emailAddresses', 'phoneNumbers', 'postalAddresses', 'birthDay', 'comment',
+]);
 /** Attachments may only be downloaded from this path of the connected Kerio server. */
 const ATTACHMENT_PATH_PREFIX = '/webmail/api/download/attachment/';
 /** Mails.create saves a new draft, Mails.set changes one; both only ever with send: false. */
@@ -161,6 +169,63 @@ export class KerioClient {
   public async getMailFolders(): Promise<KerioFolder[]> {
     const result = await this.read<{ list: KerioFolder[] }>('Folders.get', {});
     return result.list.filter((folder) => folder.type === 'FMail');
+  }
+
+  public async getContactFolders(): Promise<KerioFolder[]> {
+    const result = await this.read<{ list: KerioFolder[] }>('Folders.get', {});
+    return result.list.filter((folder) => folder.type === 'FContact');
+  }
+
+  public async getContacts(folderIds: string[], start: number, limit: number): Promise<{ list: KerioContact[]; totalItems: number }> {
+    return this.read('Contacts.get', {
+      folderIds,
+      query: {
+        fields: ['id', 'folderId', 'type', 'commonName', 'firstName', 'surName', 'companyName', 'emailAddresses', 'phoneNumbers'],
+        start, limit, orderBy: [{ columnName: 'id', direction: 'Asc', caseSensitive: true }],
+      },
+    });
+  }
+
+  public async getContact(id: string): Promise<KerioContact> {
+    const response = await this.read<{ result: KerioContact[]; errors: KerioError[] }>('Contacts.getById', { ids: [id] });
+    if (response.errors?.length) throw new KerioApiError(describeErrors(response.errors));
+    const contact = response.result?.find((item) => item.id === id);
+    if (!contact) throw new KerioApiError(`Contact not found: ${id}`);
+    return contact;
+  }
+
+  /** One bounded write; fields not included in the patch are left to Kerio unchanged. */
+  public async saveContact(fields: Record<string, unknown>, id?: string): Promise<string> {
+    if (!fields.folderId || Object.keys(fields).some((key) => !CONTACT_FIELDS.has(key))) {
+      throw new KerioPolicyError('Invalid contact fields or missing contact folder');
+    }
+    const folders = await this.getContactFolders();
+    if (!folders.some((folder) => folder.id === fields.folderId)) throw new KerioPolicyError('Not an accessible contact folder');
+    if (id) {
+      const current = await this.getContact(id);
+      if (current.folderId !== fields.folderId || current.isGalContact || current.type !== 'ctContact') {
+        throw new KerioPolicyError('Only ordinary contacts in their existing folder can be updated');
+      }
+    }
+    const method = id ? 'Contacts.set' : 'Contacts.create';
+    const contact = id ? { ...fields, id } : { ...fields, type: 'ctContact' };
+    const result = await this.post<MailsWriteResult>(method, { contacts: [contact] }, this.session, undefined, CONTACT_WRITE);
+    if (result.errors?.length) throw new KerioApiError(`Contact was not saved: ${describeErrors(result.errors)}`);
+    const savedId = id ?? result.result?.[0]?.id;
+    if (!savedId) throw new KerioTransportError('Contact write result unknown: Kerio returned no contact ID. Do not create it again without checking.', true);
+    return savedId;
+  }
+
+  /** Explicit state assignment, never a toggle. No automatic retries, even on timeouts. */
+  public async setReadStatus(id: string, read: boolean): Promise<void> {
+    if (!id || typeof read !== 'boolean') throw new KerioPolicyError('A message ID and boolean read state are required');
+    await this.read('Folders.get', {});
+    const result = await this.post<MailsWriteResult>('Mails.set', { mails: [{ id, isSeen: read }] }, this.session, undefined, STATUS_WRITE);
+    if (result.errors?.length) throw new KerioApiError(describeErrors(result.errors));
+    const verified = await this.getMailsById([id]);
+    if (verified.errors.length || verified.result.find((mail) => mail.id === id)?.isSeen !== read) {
+      throw new KerioTransportError('Read status could not be verified; result unknown. Read the message state before retrying.', true);
+    }
   }
 
   /** One page of mails from the given folders, newest first. totalItems counts all matches. */
@@ -356,9 +421,25 @@ export class KerioClient {
     method: string,
     params: unknown,
     session: Session | null,
-    onHeaders?: (headers: Record<string, string | string[] | undefined>) => void
+    onHeaders?: (headers: Record<string, string | string[] | undefined>) => void,
+    capability?: symbol
   ): Promise<T> {
-    if (DRAFT_METHODS.has(method)) {
+    if (capability === STATUS_WRITE) {
+      const mails = (params as { mails?: Record<string, unknown>[] })?.mails;
+      if (method !== 'Mails.set' || !Array.isArray(mails) || mails.length !== 1 ||
+          typeof mails[0]?.id !== 'string' || !mails[0].id || typeof mails[0].isSeen !== 'boolean' ||
+          Object.keys(mails[0]).some((key) => key !== 'id' && key !== 'isSeen')) {
+        throw new KerioPolicyError('Only an ID and isSeen may be written through the read-status path');
+      }
+    } else if (capability === CONTACT_WRITE) {
+      const contacts = (params as { contacts?: Record<string, unknown>[] })?.contacts;
+      const allowed = new Set([...CONTACT_FIELDS, method === 'Contacts.set' ? 'id' : 'type']);
+      if (!['Contacts.create', 'Contacts.set'].includes(method) || !Array.isArray(contacts) || contacts.length !== 1 ||
+          !contacts[0]?.folderId || Object.keys(contacts[0]).some((key) => !allowed.has(key)) ||
+          (method === 'Contacts.set' ? !contacts[0].id : contacts[0].type !== 'ctContact')) {
+        throw new KerioPolicyError('Invalid contact write');
+      }
+    } else if (DRAFT_METHODS.has(method)) {
       assertDraftOnly(method, params);
     } else if (method !== 'Session.login' && !READ_METHODS.has(method)) {
       throw new KerioPolicyError(`Kerio API method ${method} is not allowed`);

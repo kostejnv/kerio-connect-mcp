@@ -1,7 +1,7 @@
 {
   "name": "kerio-connect-mcp",
-  "version": "0.5.0",
-  "description": "MCP server for Kerio Connect mail: reliable search and reading, drafts for the user to send",
+  "version": "0.6.0",
+  "description": "MCP server for Kerio Connect mail: mail search, drafts, explicit read status and contacts",
   "author": "aimbit GmbH <info@aimbit.de>",
   "license": "MIT",
   "type": "module",

@@ -1,17 +1,18 @@
-# Kerio Connect MCP (mail)
+# Kerio Connect MCP (mail and contacts)
 
 An [MCP](https://modelcontextprotocol.io) server that connects AI assistants (Claude, ChatGPT, Claude Code, …) to a
 **Kerio Connect** mailbox.
 
 - **Reading:** list folders, search the whole history, read complete messages, read attachments and get download links
   for them. Reading never marks messages as read or changes them.
+- **Explicit updates:** mark selected messages read or unread; find, create and partially update contacts, including birthdays.
 - **Drafts, never sending:** the assistant prepares e-mails and replies as drafts in the Drafts folder; the user reviews
   and sends them from Kerio Webmail. The server has no way to send e-mail.
 - **Remote or local:** a hosted endpoint with OAuth sign-in (users enter their own Kerio server, username and password;
   nothing is stored on the server), or a local stdio process for one mailbox.
 - **Direct Kerio API:** talks to the Kerio client JSON-RPC API (`/webmail/api/jsonrpc`). No IMAP, no Outlook, no forwarding.
 
-Fork of [aimbitgmbh/kerio-connect-mcp](https://github.com/aimbitgmbh/kerio-connect-mcp) (MIT), narrowed to mail and
+Fork of [aimbitgmbh/kerio-connect-mcp](https://github.com/aimbitgmbh/kerio-connect-mcp) (MIT), focused on mail and contacts, and
 reworked for reliable reading and remote use.
 
 ## Tools
@@ -25,6 +26,11 @@ reworked for reliable reading and remote use.
 | `mail_attachment_link` | Download links for attachments in their original format, one per file plus one ZIP (remote mode, 10 minutes) |
 | `mail_create_draft` | Save a new e-mail or a reply (`replyToId`, `replyAll`: recipients, `RE:` subject, quoted original, In-Reply-To) as a draft; text in a small Markdown subset; attachments only from e-mails already in the mailbox, new files as links in the text |
 | `mail_update_draft` | Change recipients, subject, text or attachments of a draft; only messages in the Drafts folder |
+| `mail_set_read_status` | Set selected message IDs to read or unread, with verified per-message outcomes |
+| `contacts_search` | Search by name, e-mail or phone; browse contacts and discover contact folders |
+| `contacts_get` | Read a complete contact by ID |
+| `contacts_create` | Create an ordinary contact in a selected contact folder |
+| `contacts_update` | Partially update a contact; omitted fields stay unchanged |
 
 Details and response formats: [docs/tools.md](docs/tools.md). Opening the server address in a browser shows a landing
 page with the same information for people.
@@ -67,7 +73,7 @@ Build first with `npm install && npm run build`.
 | Document | Contents |
 |---|---|
 | [Tools](docs/tools.md) | Arguments, response formats, completeness and continuation |
-| [Security](docs/security.md) | Read-only reading, drafts-only writing, tokens and credentials, network policy |
+| [Security](docs/security.md) | Read-only reading, restricted writes, tokens and credentials, network policy |
 | [Architecture](docs/architecture.md) | Components, sign-in and request flows, stateless design, Kerio API usage |
 | [Deployment](docs/deployment.md) | Docker and reverse proxy setup, configuration, operations, troubleshooting |
 | [Development](docs/development.md) | Local setup, tests and the Kerio API mock, extending the server |
@@ -76,8 +82,9 @@ Build first with `npm install && npm run build`.
 
 ## Status
 
-All behaviour is covered by tests against a simulated Kerio API. It has **not yet been verified against a real Kerio
-Connect server**; see [docs/verification.md](docs/verification.md) for the open assumptions and how to check them.
+Mail reading and drafts have been checked against a real Kerio server; see [docs/verification.md](docs/verification.md).
+Contacts and explicit read/unread updates are covered by simulated API tests and still need a controlled real-server pilot.
+For the suggested agent workflow, see [docs/triage-workflow.md](docs/triage-workflow.md).
 
 ## License
 
